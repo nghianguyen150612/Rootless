@@ -21,7 +21,7 @@ for tool in cmake dpkg-deb mktemp; do
     }
 done
 
-work=$(mktemp -d "$TMPDIR/rootless-p1.XXXXXXXX")
+work=$(mktemp -d "$TMPDIR/rootless-p2.XXXXXXXX")
 trap 'rm -rf -- "$work"' EXIT HUP INT TERM
 cmake -S "$repo_dir" -B "$work/build" \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX="$PREFIX"
@@ -30,14 +30,14 @@ mkdir -p "$work/pkg/DEBIAN"
 DESTDIR="$work/pkg" cmake --install "$work/build"
 cat > "$work/pkg/DEBIAN/control" <<'CONTROL'
 Package: rootless
-Version: 0.1.0~p1
+Version: 0.1.0~p2
 Architecture: aarch64
 Maintainer: Rootless contributors
 Section: utils
 Priority: optional
-Description: Experimental rootless native-first Linux runtime (P1 native execution)
+Description: Experimental rootless native-first Linux runtime (P2 syscall prototype)
  Direct static ELF execution only; no rootfs isolation.
 CONTROL
-out="$repo_dir/rootless_0.1.0~p1_aarch64.deb"
+out="$repo_dir/rootless_0.1.0~p2_aarch64.deb"
 dpkg-deb --build --root-owner-group "$work/pkg" "$out"
 printf 'Package created: %s\n' "$out"

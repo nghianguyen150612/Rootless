@@ -9,12 +9,12 @@
 #include <string.h>
 #include <sys/utsname.h>
 
-#define RL_VERSION "0.1.0-p1"
+#define RL_VERSION "0.1.0-p2"
 #define RL_EX_USAGE 64
 #define RL_EX_UNAVAILABLE 69
 
 static void usage(FILE *file) {
-    fputs("Rootless — native-first Linux runtime for Android (P1 native execution)\n"
+    fputs("Rootless — native-first Linux runtime for Android (P2 syscall prototype)\n"
           "Usage: rl [--help | --version]\n"
           "       rl probe [--verbose]\n"
           "\n"

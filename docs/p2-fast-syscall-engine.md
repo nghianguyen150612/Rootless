@@ -90,9 +90,16 @@ The smoke fixture checks that an absolute path reads a file from a disposable
 temporary root, a relative `openat` continues normally, `getpid` remains
 operational, missing files preserve `ENOENT`, and the caller's CWD is
 unchanged. P1's direct execution regressions remain in the same CTest suite.
+On Linux x86_64 kernel 6.18.57 with GCC 14.2.0, warning-enabled direct GCC
+builds passed for `rl`, the P0 probe tests, and static native fixtures. The P0
+probe contract, P1 `native_test.py` regression suite, new interception smoke
+test, `rl probe --verbose`, `rl native-probe`, and the Termux packaging script
+syntax check passed. CMake and Clang were not installed in this local
+environment.
+
 The CI matrix requests native Linux x86_64 and AArch64 with GCC and Clang.
-This establishes build/test requests; job results must be inspected before
-claiming CI pass evidence. Android is **NOT_RUN**.
+Workflow job results must be inspected before claiming CI pass evidence.
+Android is **NOT_RUN**.
 
 Comprehensive filesystem differential tests, directory-FD and CWD semantics,
 all path operations, dynamic ELF and loader lifecycle, stress/race testing,
