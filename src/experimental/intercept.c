@@ -1,0 +1,433 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+#define _GNU_SOURCE
+#include "rootless/intercept.h"
+#include "rootless/native.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/openat2.h>
+#include <linux/seccomp.h>
+#include <poll.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+#ifndef SECCOMP_FILTER_FLAG_NEW_LISTENER
+#define SECCOMP_FILTER_FLAG_NEW_LISTENER (1UL << 3)
+#endif
+#ifndef SECCOMP_RET_USER_NOTIF
+#define SECCOMP_RET_USER_NOTIF 0x7fc00000U
+#endif
+#ifndef SECCOMP_USER_NOTIF_FLAG_CONTINUE
+#define SECCOMP_USER_NOTIF_FLAG_CONTINUE 1
+#endif
+
+struct result_message {
+    int error;
+    int exit_status;
+};
+
+static int send_listener(int sock, int listener) {
+    char marker = 'L';
+    struct iovec iov = { .iov_base = &marker, .iov_len = sizeof(marker) };
+    union {
+        struct cmsghdr align;
+        char bytes[CMSG_SPACE(sizeof(int))];
+    } control;
+    memset(&control, 0, sizeof(control));
+    struct msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = control.bytes,
+        .msg_controllen = sizeof(control.bytes)
+    };
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &listener, sizeof(listener));
+    ssize_t sent;
+    do sent = sendmsg(sock, &msg, 0); while (sent < 0 && errno == EINTR);
+    if (sent != 1) return sent < 0 ? errno : EIO;
+    return 0;
+}
+
+static void send_setup_error(int sock, int error) {
+    struct { char marker; int error; } packet = { .marker = 'E', .error = error };
+    (void)send(sock, &packet, sizeof(packet), MSG_NOSIGNAL);
+}
+
+static int receive_listener(int sock) {
+    struct { char marker; int error; } packet = {0};
+    struct iovec iov = { .iov_base = &packet, .iov_len = sizeof(packet) };
+    union {
+        struct cmsghdr align;
+        char bytes[CMSG_SPACE(sizeof(int))];
+    } control;
+    memset(&control, 0, sizeof(control));
+    struct msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = control.bytes,
+        .msg_controllen = sizeof(control.bytes)
+    };
+    ssize_t got;
+    do got = recvmsg(sock, &msg, 0); while (got < 0 && errno == EINTR);
+    if (got < 0) return -errno;
+    if (msg.msg_flags & MSG_CTRUNC) return -EPROTO;
+    if (got == sizeof(packet) && packet.marker == 'E' && packet.error > 0)
+        return -packet.error;
+    if (got != 1 || packet.marker != 'L') return -EPROTO;
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET ||
+        cmsg->cmsg_type != SCM_RIGHTS || cmsg->cmsg_len != CMSG_LEN(sizeof(int)))
+        return -EPROTO;
+    int fd;
+    memcpy(&fd, CMSG_DATA(cmsg), sizeof(fd));
+    return fd;
+}
+
+static int install_openat_filter(void) {
+#if !defined(SYS_seccomp) || !defined(SYS_openat)
+    return -ENOTSUP;
+#elif defined(__aarch64__)
+    const uint32_t native_arch = AUDIT_ARCH_AARCH64;
+#elif defined(__x86_64__)
+    const uint32_t native_arch = AUDIT_ARCH_X86_64;
+#else
+    return -ENOTSUP;
+#endif
+#if defined(SYS_seccomp) && defined(SYS_openat) && \
+    (defined(__aarch64__) || defined(__x86_64__))
+    struct sock_filter code[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (uint32_t)offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, native_arch, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (uint32_t)offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program = {
+        .len = (unsigned short)(sizeof(code) / sizeof(code[0])),
+        .filter = code
+    };
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return -errno;
+    long fd = syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
+                      SECCOMP_FILTER_FLAG_NEW_LISTENER, &program);
+    return fd < 0 ? -errno : (int)fd;
+#endif
+}
+
+static void guest_child(int sock, int rootfd, int execfd,
+                        char *const argv[], char *const envp[]) {
+    if (fchdir(rootfd) != 0) {
+        send_setup_error(sock, errno);
+        _exit(125);
+    }
+    int listener = install_openat_filter();
+    if (listener < 0) {
+        send_setup_error(sock, -listener);
+        _exit(125);
+    }
+    int error = send_listener(sock, listener);
+    close(listener);
+    close(sock);
+    if (error) _exit(125);
+#ifdef SYS_execveat
+    syscall(SYS_execveat, execfd, "", argv, envp, AT_EMPTY_PATH);
+    error = errno;
+#else
+    error = ENOSYS;
+#endif
+    dprintf(STDERR_FILENO, "rl dev-intercept: exec failed: errno=%d (%s)\n",
+            error, strerror(error));
+    _exit(error == ENOENT ? 127 : 126);
+}
+
+static int read_tracee_path(pid_t pid, uintptr_t address, char path[PATH_MAX]) {
+    struct iovec local = { .iov_base = path, .iov_len = PATH_MAX };
+    struct iovec remote = { .iov_base = (void *)address, .iov_len = PATH_MAX };
+    ssize_t count;
+    do count = process_vm_readv(pid, &local, 1, &remote, 1, 0);
+    while (count < 0 && errno == EINTR);
+    if (count < 0 && (errno == ENOSYS || errno == EPERM || errno == EACCES)) {
+        /* Some Android/container policies disable process_vm_readv while
+           allowing the same parent-child read through procfs. */
+        char mem_path[64];
+        int length = snprintf(mem_path, sizeof(mem_path), "/proc/%ld/mem", (long)pid);
+        if (length < 0 || (size_t)length >= sizeof(mem_path)) return EOVERFLOW;
+        int memfd = open(mem_path, O_RDONLY | O_CLOEXEC);
+        if (memfd < 0) return errno;
+        if ((uintmax_t)address > (uintmax_t)INT64_MAX) {
+            close(memfd);
+            return EFAULT;
+        }
+        do count = pread(memfd, path, PATH_MAX, (off_t)address);
+        while (count < 0 && errno == EINTR);
+        int error = count < 0 ? errno : 0;
+        close(memfd);
+        if (error) return error;
+    } else if (count < 0) {
+        return errno;
+    }
+    if (count == 0) return EFAULT;
+    if (!memchr(path, '\0', (size_t)count))
+        return count == PATH_MAX ? ENAMETOOLONG : EFAULT;
+    return 0;
+}
+
+static int send_response(int listener, uint64_t id, int error, int value,
+                         uint32_t flags) {
+    struct seccomp_notif_resp response = {
+        .id = id,
+        .val = value,
+        .error = error ? -error : 0,
+        .flags = flags
+    };
+    if (ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &response) == 0) return 0;
+    if (errno == ENOENT) return 0; /* The notified task exited. */
+    return errno;
+}
+
+static int handle_notification(int listener, int rootfd) {
+    struct seccomp_notif_sizes sizes;
+    if (syscall(SYS_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &sizes) != 0)
+        return errno;
+    if (sizes.seccomp_notif > sizeof(struct seccomp_notif) ||
+        sizes.seccomp_notif_resp > sizeof(struct seccomp_notif_resp) ||
+        sizes.seccomp_data > sizeof(((struct seccomp_notif *)0)->data))
+        return EOVERFLOW;
+    struct seccomp_notif request;
+    memset(&request, 0, sizeof(request));
+    if (ioctl(listener, SECCOMP_IOCTL_NOTIF_RECV, &request) != 0)
+        return errno == ENOENT || errno == EINTR ? 0 : errno;
+    if (ioctl(listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &request.id) != 0)
+        return errno == ENOENT ? 0 : errno;
+
+    /* Relative paths retain normal openat semantics. Only absolute paths are
+       redirected; this interface does not claim to confine filesystem access. */
+    char path[PATH_MAX];
+    int error = read_tracee_path((pid_t)request.pid,
+                                 (uintptr_t)request.data.args[1], path);
+    if (error) return send_response(listener, request.id, error, 0, 0);
+    if (path[0] != '/')
+        return send_response(listener, request.id, 0, 0,
+                             SECCOMP_USER_NOTIF_FLAG_CONTINUE);
+
+#if !defined(SYS_openat2)
+    return send_response(listener, request.id, ENOTSUP, 0, 0);
+#else
+    struct open_how how = {
+        .flags = request.data.args[2],
+        .mode = request.data.args[3],
+        .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
+    };
+    int opened = (int)syscall(SYS_openat2, rootfd, path, &how, sizeof(how));
+    if (opened < 0)
+        return send_response(listener, request.id, errno, 0, 0);
+    struct seccomp_notif_addfd addfd = {
+        .id = request.id,
+        .srcfd = (uint32_t)opened,
+        .newfd = 0,
+        .flags = 0,
+        .newfd_flags = 0
+    };
+    int targetfd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &addfd);
+    error = targetfd < 0 ? errno : 0;
+    close(opened);
+    if (error) return send_response(listener, request.id, error, 0, 0);
+    return send_response(listener, request.id, 0, targetfd, 0);
+#endif
+}
+
+static int reap_available(pid_t primary, int *primary_status, int *primary_seen) {
+    for (;;) {
+        int status;
+        pid_t child = waitpid(-1, &status, WNOHANG);
+        if (child > 0) {
+            if (child == primary) {
+                *primary_status = status;
+                *primary_seen = 1;
+            }
+            continue;
+        }
+        if (child == 0) return 0;
+        if (errno == EINTR) continue;
+        if (errno == ECHILD) return ECHILD;
+        return errno;
+    }
+}
+
+static int supervise_guest(int rootfd, int execfd, char *const argv[],
+                           char *const envp[], int *exit_status) {
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return errno;
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0)
+        return errno;
+    pid_t guest = fork();
+    if (guest < 0) {
+        int error = errno;
+        close(sockets[0]);
+        close(sockets[1]);
+        return error;
+    }
+    if (guest == 0) {
+        close(sockets[0]);
+        guest_child(sockets[1], rootfd, execfd, argv, envp);
+        _exit(125);
+    }
+    close(sockets[1]);
+    int listener = receive_listener(sockets[0]);
+    close(sockets[0]);
+    if (listener < 0) {
+        int ignored;
+        while (waitpid(guest, &ignored, 0) < 0 && errno == EINTR) {}
+        return -listener;
+    }
+
+    int primary_status = 0;
+    int primary_seen = 0;
+    int error = 0;
+    for (;;) {
+        int reap_error = reap_available(guest, &primary_status, &primary_seen);
+        if (reap_error == ECHILD) break;
+        if (reap_error) { error = reap_error; break; }
+        struct pollfd pfd = { .fd = listener, .events = POLLIN };
+        int ready;
+        do ready = poll(&pfd, 1, 100); while (ready < 0 && errno == EINTR);
+        if (ready < 0) { error = errno; break; }
+        if (ready > 0 && (pfd.revents & POLLIN)) {
+            error = handle_notification(listener, rootfd);
+            if (error) break;
+        }
+        if (ready > 0 && (pfd.revents & (POLLERR | POLLNVAL))) {
+            error = EIO;
+            break;
+        }
+    }
+    close(listener);
+    if (error) return error;
+    if (!primary_seen) return ECHILD;
+    if (WIFEXITED(primary_status)) *exit_status = WEXITSTATUS(primary_status);
+    else if (WIFSIGNALED(primary_status)) *exit_status = 128 + WTERMSIG(primary_status);
+    else *exit_status = 125;
+    return 0;
+}
+
+static void supervisor_process(int result_fd, int rootfd, int execfd,
+                               char *const argv[], char *const envp[]) {
+    int status = 125;
+    int error = supervise_guest(rootfd, execfd, argv, envp, &status);
+    struct result_message result = { .error = error, .exit_status = status };
+    const char *p = (const char *)&result;
+    size_t remaining = sizeof(result);
+    while (remaining) {
+        ssize_t n = write(result_fd, p, remaining);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        p += n;
+        remaining -= (size_t)n;
+    }
+    close(result_fd);
+    close(rootfd);
+    close(execfd);
+    _exit(error ? 1 : 0);
+}
+
+int rl_experimental_intercept_run(const char *root_directory,
+                                  const char *executable,
+                                  char *const argv[],
+                                  char *const envp[],
+                                  int *exit_status) {
+    if (!root_directory || !executable || !argv || !argv[0] || !envp ||
+        !exit_status) return EINVAL;
+    int error;
+    int rootfd = open(root_directory, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (rootfd < 0) return errno;
+#if defined(SYS_openat2)
+    struct open_how feature_probe = {
+        .flags = O_PATH | O_CLOEXEC,
+        .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
+    };
+    int probe_fd = (int)syscall(SYS_openat2, rootfd, ".", &feature_probe,
+                                sizeof(feature_probe));
+    if (probe_fd < 0) {
+        error = errno;
+        close(rootfd);
+        return error == ENOSYS ? ENOTSUP : error;
+    }
+    close(probe_fd);
+#else
+    close(rootfd);
+    return ENOTSUP;
+#endif
+    int execfd = open(executable, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (execfd < 0) {
+        int error = errno;
+        close(rootfd);
+        return error;
+    }
+    error = rl_check_native(execfd);
+    if (error) {
+        close(execfd);
+        close(rootfd);
+        return error;
+    }
+    int result_pipe[2];
+    if (pipe2(result_pipe, O_CLOEXEC) != 0) {
+        error = errno;
+        close(execfd);
+        close(rootfd);
+        return error;
+    }
+    pid_t supervisor = fork();
+    if (supervisor < 0) {
+        error = errno;
+        close(result_pipe[0]);
+        close(result_pipe[1]);
+        close(execfd);
+        close(rootfd);
+        return error;
+    }
+    if (supervisor == 0) {
+        close(result_pipe[0]);
+        supervisor_process(result_pipe[1], rootfd, execfd, argv, envp);
+    }
+    close(result_pipe[1]);
+    close(execfd);
+    close(rootfd);
+    struct result_message result;
+    char *p = (char *)&result;
+    size_t received = 0;
+    while (received < sizeof(result)) {
+        ssize_t n = read(result_pipe[0], p + received, sizeof(result) - received);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        received += (size_t)n;
+    }
+    close(result_pipe[0]);
+    int wait_status;
+    while (waitpid(supervisor, &wait_status, 0) < 0) {
+        if (errno != EINTR) return errno;
+    }
+    if (received != sizeof(result) || !WIFEXITED(wait_status) ||
+        WEXITSTATUS(wait_status) != 0) return EIO;
+    *exit_status = result.exit_status;
+    return result.error;
+}

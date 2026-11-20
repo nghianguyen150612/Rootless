@@ -6,7 +6,7 @@ Rootless is an experimental, CLI-only, native-first Linux runtime project for
 **Android AArch64**, developed for Termux. The command is `rl`. Rootless does
 **not** require Magisk, `su`, a modified kernel, an unlocked bootloader or an APK.
 
-## Current status: P1 native execution foundation
+## Current status: P2 selective syscall prototype
 
 `rl run -- ./static-program [ARG...]` replaces `rl` with a native static ELF
 using kernel exec semantics. **This is direct execution with no filesystem
@@ -16,10 +16,16 @@ target; x86_64 is supported for native CI validation. Android/Termux execution
 is **NOT_RUN** until tested on real hardware.
 
 Only little-endian ELF64 static ET_EXEC files matching the build architecture
-are accepted. Scripts, foreign architectures, dynamic executables and static
-PIE are unsupported in P1. There is no custom ELF loader, CPU emulation,
-syscall virtualization, or fallback backend. The kernel enforces execution
+are accepted by `rl run`. Scripts, foreign architectures, dynamic executables
+and static PIE remain unsupported by that P1 backend. There is no custom ELF
+loader, CPU emulation, or fallback backend. The kernel enforces execution
 permissions, mount flags and LSM policy; errors include numeric errno values.
+
+`rl dev-intercept --root DIR -- FILE [ARG...]` is a development-only P2
+experiment. It redirects absolute `openat` calls using a seccomp user-notify
+supervisor; other syscalls remain native. It is not rootfs execution or
+filesystem isolation and is not part of ordinary `rl run`. See
+[P2 engine limits and evidence](docs/p2-fast-syscall-engine.md).
 
 `rl native-probe` tests user namespaces, UID/GID mappings, mount namespace and
 private propagation, effective CAP_SYS_CHROOT, and real chroot in a disposable
@@ -27,7 +33,9 @@ child. Each dependent step is skipped when a prerequisite fails. A successful
 probe does not enable a rootfs launcher. `rl run -r ...` returns 69 because no
 correct root-directory execution backend exists yet.
 
-See [P1 implementation and validation](docs/p1-native-execution.md).
+See [P1 implementation and validation](docs/p1-native-execution.md) for direct
+execution and [P2 engine limits and evidence](docs/p2-fast-syscall-engine.md)
+for the isolated experiment.
 
 ### Build / test on Linux
 
@@ -58,12 +66,12 @@ To create a local Termux `.deb` (requires `dpkg-deb`):
 ```sh
 pkg install clang cmake make python dpkg
 sh packaging/termux/build-deb.sh
-pkg install ./rootless_0.1.0~p1_aarch64.deb
+pkg install ./rootless_0.1.0~p2_aarch64.deb
 rl probe
 ```
 
 The script builds a Termux-prefix binary on-device; it has **not** been
-validated on real Android in P1. Do not try to install a Linux/glibc CI build
+validated on real Android in P2. Do not try to install a Linux/glibc CI build
 into Termux. `pkg install rootless` will not work until a Termux package
 repository publishes it.
 
@@ -74,6 +82,7 @@ repository publishes it.
 | `rl --version`, `rl --help` | Implemented |
 | `rl probe [--verbose]` | Executes isolated kernel feature probes |
 | `rl run -- FILE [ARG...]` | Native direct static ELF execution |
+| `rl dev-intercept --root DIR -- FILE [ARG...]` | Experimental selected `openat` interception; not isolation |
 | `rl native-probe` | Isolated P1 namespace/mapping/chroot feasibility |
 | `rl run -r ROOTFS -- COMMAND` | Unsupported; exit 69 |
 | `rl doctor`, `rl info`, `rl benchmark` | Not implemented; exit 69 |
