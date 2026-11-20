@@ -1,4 +1,4 @@
-name: P0 native build and tests
+name: P1 native build and tests
 on:
   push:
   pull_request:
@@ -23,5 +23,11 @@ jobs:
         run: ctest --test-dir build --output-on-failure
       - name: Probe smoke test
         run: ./build/rl probe --verbose
+      - name: Native feasibility (host-specific)
+        run: ./build/rl native-probe
+      - name: Require native execution coverage
+        run: test -x build/native_fixture && ctest --test-dir build -R native_execution --verbose
+      - name: Android status
+        run: echo 'Android/Termux NOT_RUN - real hardware required'
       - name: Validate Termux packaging script syntax
         run: sh -n packaging/termux/build-deb.sh

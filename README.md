@@ -6,13 +6,28 @@ Rootless is an experimental, CLI-only, native-first Linux runtime project for
 **Android AArch64**, developed for Termux. The command is `rl`. Rootless does
 **not** require Magisk, `su`, a modified kernel, an unlocked bootloader or an APK.
 
-## Current status: P0 foundation only
+## Current status: P1 native execution foundation
 
-**Rootless cannot yet run a Linux root filesystem or replace PRoot/chroot.**
-`rl probe` evaluates narrow host capabilities; it is not a compatibility
-certification. `rl run`, `doctor`, `info` and `benchmark` are deliberately
-unimplemented and return exit status 69. No daemon, telemetry, guest ELF loader,
-path translation, or seccomp-based virtual filesystem exists yet.
+`rl run -- ./static-program [ARG...]` replaces `rl` with a native static ELF
+using kernel exec semantics. **This is direct execution with no filesystem
+isolation**, using the caller's credentials, working directory, environment and
+inheritable descriptors. No PATH search is performed. Linux AArch64 is the
+target; x86_64 is supported for native CI validation. Android/Termux execution
+is **NOT_RUN** until tested on real hardware.
+
+Only little-endian ELF64 static ET_EXEC files matching the build architecture
+are accepted. Scripts, foreign architectures, dynamic executables and static
+PIE are unsupported in P1. There is no custom ELF loader, CPU emulation,
+syscall virtualization, or fallback backend. The kernel enforces execution
+permissions, mount flags and LSM policy; errors include numeric errno values.
+
+`rl native-probe` tests user namespaces, UID/GID mappings, mount namespace and
+private propagation, effective CAP_SYS_CHROOT, and real chroot in a disposable
+child. Each dependent step is skipped when a prerequisite fails. A successful
+probe does not enable a rootfs launcher. `rl run -r ...` returns 69 because no
+correct root-directory execution backend exists yet.
+
+See [P1 implementation and validation](docs/p1-native-execution.md).
 
 ### Build / test on Linux
 
@@ -31,7 +46,7 @@ remains Android AArch64. Linux CI does not prove Android behavior.
 ### Build on Termux (requires an Android AArch64 device)
 
 ```sh
-pkg install clang cmake make
+pkg install clang cmake make python
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
@@ -41,24 +56,26 @@ ctest --test-dir build --output-on-failure
 To create a local Termux `.deb` (requires `dpkg-deb`):
 
 ```sh
-pkg install clang cmake make dpkg
+pkg install clang cmake make python dpkg
 sh packaging/termux/build-deb.sh
-pkg install ./rootless_0.1.0~p0_aarch64.deb
+pkg install ./rootless_0.1.0~p1_aarch64.deb
 rl probe
 ```
 
 The script builds a Termux-prefix binary on-device; it has **not** been
-validated on real Android in P0. Do not try to install a Linux/glibc CI build
+validated on real Android in P1. Do not try to install a Linux/glibc CI build
 into Termux. `pkg install rootless` will not work until a Termux package
 repository publishes it.
 
 ### CLI contracts
 
-| Command | P0 behavior |
+| Command | Current behavior |
 | --- | --- |
 | `rl --version`, `rl --help` | Implemented |
 | `rl probe [--verbose]` | Executes isolated kernel feature probes |
-| `rl run -r ROOTFS -- COMMAND` | Not implemented; exit 69 |
+| `rl run -- FILE [ARG...]` | Native direct static ELF execution |
+| `rl native-probe` | Isolated P1 namespace/mapping/chroot feasibility |
+| `rl run -r ROOTFS -- COMMAND` | Unsupported; exit 69 |
 | `rl doctor`, `rl info`, `rl benchmark` | Not implemented; exit 69 |
 | unknown argument / command | Usage failure; exit 64 |
 

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "rootless/probe.h"
+#include "rootless/native.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -7,18 +8,19 @@
 #include <string.h>
 #include <sys/utsname.h>
 
-#define RL_VERSION "0.1.0-p0"
+#define RL_VERSION "0.1.0-p1"
 #define RL_EX_USAGE 64
 #define RL_EX_UNAVAILABLE 69
 
 static void usage(FILE *file) {
-    fputs("Rootless — native-first Linux runtime for Android (P0 foundation)\n"
+    fputs("Rootless — native-first Linux runtime for Android (P1 native execution)\n"
           "Usage: rl [--help | --version]\n"
           "       rl probe [--verbose]\n"
           "\n"
           "Commands:\n"
           "  probe       Inspect real host capabilities without modifying the caller\n"
-          "  run         Not implemented (P1+); cannot launch a guest yet\n"
+          "  run -- FILE [ARG...]  Direct native static ELF; no filesystem isolation\n"
+          "  native-probe         Test namespace/mapping/chroot feasibility in children\n"
           "  doctor      Not implemented\n"
           "  info        Not implemented\n"
           "  benchmark   Not implemented\n"
@@ -67,7 +69,36 @@ int main(int argc, char **argv) {
         fputs("rl: usage: rl probe [--verbose]\n", stderr);
         return RL_EX_USAGE;
     }
-    if (argc >= 2 && (!strcmp(argv[1], "run") || !strcmp(argv[1], "doctor") ||
+    if (argc == 2 && !strcmp(argv[1], "native-probe")) {
+        rl_capability caps[RL_NATIVE_PROBE_COUNT];
+        int error = rl_native_probes(caps);
+        if (error) {
+            fprintf(stderr, "rl: native-probe failed: errno=%d: %s\n", error, strerror(error));
+            return 70;
+        }
+        for (int i = 0; i < RL_NATIVE_PROBE_COUNT; ++i)
+            printf("%s %s errno=%d (%s): %s\n", caps[i].name,
+                rl_status_name(caps[i].status), caps[i].error_number,
+                strerror(caps[i].error_number), caps[i].detail);
+        puts("Direct execution provides no filesystem isolation. Rootfs engine: unsupported.");
+        return 0;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "run")) {
+        if (argc >= 3 && !strcmp(argv[2], "-r")) {
+            fputs("rl: root-directory execution unsupported; no isolation backend\n", stderr);
+            return RL_EX_UNAVAILABLE;
+        }
+        if (argc < 4 || strcmp(argv[2], "--")) {
+            fputs("rl: usage: rl run -- FILE [ARG...] (direct execution, no filesystem isolation)\n", stderr);
+            return RL_EX_USAGE;
+        }
+        extern char **environ;
+        int error = rl_exec_native(argv[3], &argv[3], environ);
+        fprintf(stderr, "rl: native direct execution failed: %s: errno=%d: %s\n",
+                argv[3], error, strerror(error));
+        return error == ENOENT ? 127 : 126;
+    }
+    if (argc >= 2 && (!strcmp(argv[1], "doctor") ||
                       !strcmp(argv[1], "info") || !strcmp(argv[1], "benchmark"))) {
         fprintf(stderr, "rl: %s is not implemented in P0\n", argv[1]);
         return RL_EX_UNAVAILABLE;
