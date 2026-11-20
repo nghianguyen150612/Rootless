@@ -10,7 +10,8 @@ tests are unchanged. P0 architecture/compatibility documents remain historical.
 bounded ELF64 header/program-header table. It accepts static ET_EXEC for the
 compiler target (AArch64 or x86_64), with at least one PT_LOAD and no PT_INTERP
 or PT_DYNAMIC. The kernel remains the ELF loader and final format validator.
-The launcher uses `fexecve`, the descriptor form of execve, to pin the checked
+The launcher uses `execveat(fd, "", argv, envp, AT_EMPTY_PATH)`, the kernel
+descriptor form of execve, to pin the checked
 inode instead of reopening a replaceable pathname. It adds no supervisor:
 PID, exit status, terminating signals, argv, environment, current directory and
 non-CLOEXEC descriptors retain exec semantics. Only the launcher's validation
@@ -22,9 +23,10 @@ There is no PATH search, environment editing, signal translation, CPU emulation,
 interpreter lookup, syscall interception or custom loader. The launcher requires
 read permission in addition to kernel execute permission. Executable content
 must not be concurrently modified; pinning an inode does not freeze its bytes.
-This is ordinary trusted-program execution, not a security boundary. libc's
-fexecve implementation may require execveat or an accessible /proc/self/fd;
-failures are reported, never replaced with another runtime backend.
+This is ordinary trusted-program execution, not a security boundary. The raw
+execveat syscall avoids an Android API-level dependency on libc fexecve and
+requires kernel execveat support. ENOSYS or policy denials are reported exactly;
+there is no /proc fallback or alternate runtime backend.
 
 On launch failure the CLI returns 127 for ENOENT and 126 otherwise, with exact
 numeric errno and strerror. Usage errors return 64. Root-directory execution

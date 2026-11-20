@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 rl_engine rl_select_engine(int error, int requires_root) {
@@ -59,8 +60,13 @@ int rl_exec_native(const char *path, char *const argv[], char *const envp[]) {
     if (fd < 0) return errno;
     int error = rl_check_native(fd);
     if (rl_select_engine(error, 0) == RL_ENGINE_NATIVE_DIRECT) {
-        fexecve(fd, argv, envp);
+#ifdef SYS_execveat
+        /* Raw kernel interface avoids depending on Android API-level fexecve. */
+        syscall(SYS_execveat, fd, "", argv, envp, AT_EMPTY_PATH);
         error = errno;
+#else
+        error = ENOSYS;
+#endif
     }
     close(fd);
     return error;
