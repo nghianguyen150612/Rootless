@@ -89,10 +89,35 @@ If a host blocks the injected test's prerequisites, that injection is explicitly
 NOT_RUN; it is never reported as exercised. Errors do not identify which host
 policy caused a denial solely from errno.
 
-The GitHub Actions matrix requests real Linux x86_64 and ARM64 runners with
-GCC and Clang and requires the static-execution fixture/test. Static libc and
-Python3 are needed for execution tests; CMake warns NOT_RUN if unavailable
-outside CI. No QEMU or cross-execution is used.
+The [GitHub Actions run 44671402861](https://github.com/nghianguyen150612/Rootless/actions/runs/44671402861)
+completed successfully for runtime commit
+`37de4330bbcc51d7b4e2ce98c57ab0ca51121f1f`:
+
+| Native Linux runner | Compiler | Build, P0 regressions and native execution |
+| --- | --- | --- |
+| ubuntu-24.04 x86_64 | GCC 13.3.0 | PASS, 8/8 CTest cases |
+| ubuntu-24.04 x86_64 | Clang 18.1.3 | PASS, 8/8 CTest cases |
+| ubuntu-24.04-arm AArch64 | GCC 13.3.0 | PASS, 8/8 CTest cases |
+| ubuntu-24.04-arm AArch64 | Clang 18.1.3 | PASS, 8/8 CTest cases |
+
+All four logs confirm actual static execution, argument/environment propagation,
+PID/descriptor preservation, exit/signal behavior and execution errors. No QEMU
+or cross-execution is used. The existing P0 source and tests have no diff against
+the required base commit. Local GCC build and all eight tests were also rerun
+successfully during recovery.
+
+CI feasibility is more restricted than the local host: all four runners report
+existing CAP_SYS_CHROOT absent (EPERM=1), user namespace creation supported,
+and setgroups denial failing with EACCES=13. UID/GID mapping, mount isolation,
+scoped capability and chroot steps therefore remain NOT_TESTED on those runners.
+The P0 combined user/mount namespace probe reports EPERM=1. These observed
+capability failures do not fail a successfully generated report and do not
+prevent direct static execution. A passing CI job is not evidence that chroot
+worked there.
+
+Static libc and Python3 are needed for execution tests; CMake warns NOT_RUN if
+unavailable outside CI. No compatibility, stress, performance, filesystem
+differential or cross-device test infrastructure is added in this recovery.
 
 Android/Termux: **NOT_RUN**. On actual AArch64 hardware, build with CMake,
 run CTest and both probe commands, and execute a native static ET_EXEC fixture
@@ -100,3 +125,18 @@ from an app-permitted path. Preserve exact device, kernel, policy, errno and
 compiler results. The Termux packaging recipe is updated to P1 but only its
 shell syntax is validated here. Linux ARM64 results do not establish Android
 compatibility. No P2–P6 work or performance claims are included.
+
+
+## Remaining scope and next checkpoint
+
+P1 provides a working direct native backend and actual isolated namespace/chroot
+feasibility checks. It does not provide a rootfs launch backend, and `run -r`
+continues to return unsupported. No runtime implementation changes were needed
+in this recovery; the runtime commit above remains the compiled CI evidence.
+
+Next checkpoint: execute the existing build and static native smoke tests on
+an actual Android AArch64/Termux device and capture namespace/mapping/chroot
+results with exact errno values. Until then Android execution is NOT_RUN.
+General workload compatibility, stress, differential filesystem behavior,
+performance and broad cross-device evaluation remain NOT_TESTED and deferred
+to the later roadmap, primarily P4–P6.
