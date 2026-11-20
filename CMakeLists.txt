@@ -15,9 +15,13 @@ add_library(rootless_native STATIC src/native/execute.c src/native/feasibility.c
 target_include_directories(rootless_native PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(rootless_native PUBLIC rootless_probe)
 
+add_library(rootless_experimental STATIC src/experimental/intercept.c)
+target_include_directories(rootless_experimental PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(rootless_experimental PUBLIC rootless_native)
+
 add_executable(rl src/cli/main.c)
-target_link_libraries(rl PRIVATE rootless_native)
-foreach(target IN ITEMS rootless_probe rootless_native rl)
+target_link_libraries(rl PRIVATE rootless_native rootless_experimental)
+foreach(target IN ITEMS rootless_probe rootless_native rootless_experimental rl)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
     endif()
@@ -59,7 +63,13 @@ if(BUILD_TESTING)
         add_test(NAME native_execution COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/tests/native_test.py $<TARGET_FILE:rl>
             $<TARGET_FILE:native_fixture> $<TARGET_FILE:dynamic_fixture>)
+        add_executable(intercept_fixture tests/intercept_fixture.c)
+        target_compile_options(intercept_fixture PRIVATE -fno-pie)
+        target_link_options(intercept_fixture PRIVATE -static -no-pie)
+        add_test(NAME seccomp_user_notif_intercept COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/tests/intercept_test.py $<TARGET_FILE:rl>
+            $<TARGET_FILE:intercept_fixture>)
     else()
-        message(WARNING "Static native execution tests NOT_RUN: static libc or Python3 unavailable")
+        message(WARNING "Static native execution and interception tests NOT_RUN: static libc or Python3 unavailable")
     endif()
 endif()

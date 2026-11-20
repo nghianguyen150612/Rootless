@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "rootless/probe.h"
 #include "rootless/native.h"
+#include "rootless/intercept.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -20,6 +21,7 @@ static void usage(FILE *file) {
           "Commands:\n"
           "  probe       Inspect real host capabilities without modifying the caller\n"
           "  run -- FILE [ARG...]  Direct native static ELF; no filesystem isolation\n"
+          "  dev-intercept --root DIR -- FILE [ARG...]  Experimental P2 openat redirect\n"
           "  native-probe         Test namespace/mapping/chroot feasibility in children\n"
           "  doctor      Not implemented\n"
           "  info        Not implemented\n"
@@ -97,6 +99,24 @@ int main(int argc, char **argv) {
         fprintf(stderr, "rl: native direct execution failed: %s: errno=%d: %s\n",
                 argv[3], error, strerror(error));
         return error == ENOENT ? 127 : 126;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "dev-intercept")) {
+        if (argc < 6 || strcmp(argv[2], "--root") || strcmp(argv[4], "--")) {
+            fputs("rl: usage: rl dev-intercept --root DIR -- FILE [ARG...]\n", stderr);
+            return RL_EX_USAGE;
+        }
+        extern char **environ;
+        int status = 125;
+        int error = rl_experimental_intercept_run(argv[3], argv[5], &argv[5],
+                                                   environ, &status);
+        if (error) {
+            fprintf(stderr, "rl: dev-intercept unavailable or failed: errno=%d: %s\n",
+                    error, strerror(error));
+            return error == ENOSYS || error == ENOTSUP || error == EOPNOTSUPP ||
+                           error == ENOTTY || error == EINVAL
+                       ? RL_EX_UNAVAILABLE : 70;
+        }
+        return status;
     }
     if (argc >= 2 && (!strcmp(argv[1], "doctor") ||
                       !strcmp(argv[1], "info") || !strcmp(argv[1], "benchmark"))) {
