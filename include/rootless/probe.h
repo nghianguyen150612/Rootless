@@ -4,7 +4,7 @@
 
 #include <stddef.h>
 
-#define RL_PROBE_COUNT 12
+#define RL_PROBE_COUNT 13
 
 typedef enum {
     RL_SUPPORTED = 0,

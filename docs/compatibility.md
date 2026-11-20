@@ -15,6 +15,8 @@ must be checked after a run. Linux arm64 is **not** Android arm64.
 | seccomp trap | SIGSYS on getpid in child | Architecture registers, signals, threads |
 | ptrace | `PTRACE_TRACEME` in child | Full tracing tracee supervision |
 | executable memory | RW→RX `mprotect` in child | File exec, memfd and actual ELF execution |
+| SELinux enforcing state | Read `/sys/fs/selinux/enforce` | Device policy validation |
+| Process LSM label | Read `/proc/self/attr/current` (not necessarily SELinux) | Device policy validation |
 | real chroot in user namespace | NOT_TESTED | P1 on Android |
 | Android app-data executable file | NOT_TESTED | P1 on Termux |
 | BusyBox / Alpine / Debian / Python | NOT_TESTED | P3–P5 workload results |

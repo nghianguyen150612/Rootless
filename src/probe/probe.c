@@ -238,16 +238,28 @@ size_t rl_collect_probes(rl_capability *out, size_t capacity) {
                          "requires P1 namespace/capability validation");
     out[10] = capability("android.app_data_exec", RL_NOT_TESTED, 0,
                           "requires real Android/Termux execution test");
-    FILE *f = fopen("/proc/self/attr/current", "r");
+    FILE *f = fopen("/sys/fs/selinux/enforce", "r");
     if (f == NULL) {
-        out[11] = capability("android.selinux_context", rl_status_from_errno(errno),
-                              errno, "could not read /proc/self/attr/current");
+        const int number = errno;
+        out[11] = capability("android.selinux_enforcing", rl_status_from_errno(number),
+                              number, "SELinux enforce flag inaccessible or absent");
     } else {
-        char c;
-        const int n = fscanf(f, "%c", &c);
+        int c = fgetc(f);
         fclose(f);
-        out[11] = capability("android.selinux_context", n == 1 ? RL_SUPPORTED : RL_UNKNOWN,
-                              0, "readable (context value not exposed in P0)");
+        out[11] = capability("android.selinux_enforcing",
+            c == '1' ? RL_SUPPORTED : c == '0' ? RL_UNSUPPORTED : RL_UNKNOWN,
+            0, c == '1' ? "enforcing" : c == '0' ? "permissive" : "unreadable mode");
+    }
+    f = fopen("/proc/self/attr/current", "r");
+    if (f == NULL) {
+        const int number = errno;
+        out[12] = capability("host.lsm_context", rl_status_from_errno(number),
+                              number, "LSM process label inaccessible");
+    } else {
+        int c = fgetc(f);
+        fclose(f);
+        out[12] = capability("host.lsm_context", c != EOF ? RL_SUPPORTED : RL_UNKNOWN,
+                              0, "LSM label readable (not necessarily SELinux)");
     }
     return RL_PROBE_COUNT;
 }

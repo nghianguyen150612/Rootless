@@ -32,8 +32,8 @@ narrow operational evidence, not proof that a full engine will work.
 - Android app sandbox SELinux rules still apply even if namespace syscalls
   succeed. Never evade these policies or suggest bypassing SELinux.
 - No rootfs, guest ELF, static/dynamic executable, shell or distro has passed
-  tests at P0. A readable SELinux context alone proves no capability to execute
-  files under app-private paths.
+  tests at P0. A readable LSM label (which may be AppArmor, not SELinux) proves no
+  capability to execute files under app-private paths.
 
 ## References
 

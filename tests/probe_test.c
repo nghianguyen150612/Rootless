@@ -30,6 +30,8 @@ int main(void) {
     assert(buffer[9].status == RL_NOT_TESTED);
     assert(!strcmp(buffer[10].name, "android.app_data_exec"));
     assert(buffer[10].status == RL_NOT_TESTED);
+    assert(!strcmp(buffer[11].name, "android.selinux_enforcing"));
+    assert(!strcmp(buffer[12].name, "host.lsm_context"));
     puts("probe contract: PASS");
     return 0;
 }
