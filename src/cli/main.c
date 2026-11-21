@@ -21,6 +21,7 @@ static void usage(FILE *file) {
           "Commands:\n"
           "  probe       Inspect real host capabilities without modifying the caller\n"
           "  run -- FILE [ARG...]  Direct native static ELF; no filesystem isolation\n"
+          "  run -r DIR -- FILE [ARG...]  Kernel chroot backend when permitted\n"
           "  dev-intercept --root DIR -- FILE [ARG...]  Experimental P2 openat redirect\n"
           "  native-probe         Test namespace/mapping/chroot feasibility in children\n"
           "  doctor      Not implemented\n"
@@ -82,13 +83,19 @@ int main(int argc, char **argv) {
             printf("%s %s errno=%d (%s): %s\n", caps[i].name,
                 rl_status_name(caps[i].status), caps[i].error_number,
                 strerror(caps[i].error_number), caps[i].detail);
-        puts("Direct execution provides no filesystem isolation. Rootfs engine: unsupported.");
+        puts("Direct execution provides no filesystem isolation. Rootfs engine requires a private mount namespace and chroot permission.");
         return 0;
     }
     if (argc >= 2 && !strcmp(argv[1], "run")) {
         if (argc >= 3 && !strcmp(argv[2], "-r")) {
-            fputs("rl: root-directory execution unsupported; no isolation backend\n", stderr);
-            return RL_EX_UNAVAILABLE;
+            if (argc < 6 || strcmp(argv[4], "--")) {
+                fputs("rl: usage: rl run -r DIR -- FILE [ARG...]\n", stderr);
+                return RL_EX_USAGE;
+            }
+            extern char **environ;
+            int error = rl_exec_rootfs(argv[3], argv[5], &argv[5], environ);
+            fprintf(stderr, "rl: rootfs execution failed: errno=%d: %s\n", error, strerror(error));
+            return error == ENOENT ? 127 : 126;
         }
         if (argc < 4 || strcmp(argv[2], "--")) {
             fputs("rl: usage: rl run -- FILE [ARG...] (direct execution, no filesystem isolation)\n", stderr);
