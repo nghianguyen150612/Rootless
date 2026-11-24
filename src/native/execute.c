@@ -14,7 +14,7 @@ rl_engine rl_select_engine(int error, int requires_root) {
     return error == 0 && !requires_root ? RL_ENGINE_NATIVE_DIRECT : RL_ENGINE_UNSUPPORTED;
 }
 
-int rl_check_native(int fd) {
+static int check_native_elf(int fd, int type) {
     Elf64_Ehdr h;
     struct stat st;
     if (fstat(fd, &st) != 0) return errno;
@@ -24,7 +24,7 @@ int rl_check_native(int fd) {
     if (n != sizeof(h) || memcmp(h.e_ident, ELFMAG, SELFMAG) ||
         h.e_ident[EI_CLASS] != ELFCLASS64 || h.e_ident[EI_DATA] != ELFDATA2LSB ||
         h.e_ident[EI_VERSION] != EV_CURRENT || h.e_version != EV_CURRENT ||
-        h.e_ehsize != sizeof(h) || h.e_type != ET_EXEC ||
+        h.e_ehsize != sizeof(h) || h.e_type != type ||
         h.e_phentsize != sizeof(Elf64_Phdr) || h.e_phnum == 0 || h.e_phnum == PN_XNUM)
         return ENOEXEC;
 #if defined(__aarch64__)
@@ -43,7 +43,8 @@ int rl_check_native(int fd) {
         n = pread(fd, &p, sizeof(p), (off_t)(h.e_phoff + i * sizeof(p)));
         if (n < 0) return errno;
         if (n != sizeof(p)) return ENOEXEC;
-        if (p.p_type == PT_INTERP || p.p_type == PT_DYNAMIC) return ENOTSUP;
+        if (p.p_type == PT_INTERP || (type == ET_EXEC && p.p_type == PT_DYNAMIC))
+            return ENOTSUP;
         if (p.p_type == PT_LOAD) {
             if (p.p_filesz > p.p_memsz || p.p_offset > (uint64_t)st.st_size ||
                 p.p_filesz > (uint64_t)st.st_size - p.p_offset) return ENOEXEC;
@@ -51,6 +52,14 @@ int rl_check_native(int fd) {
         }
     }
     return load ? 0 : ENOEXEC;
+}
+
+int rl_check_native(int fd) {
+    return check_native_elf(fd, ET_EXEC);
+}
+
+int rl_check_native_linker(int fd) {
+    return check_native_elf(fd, ET_DYN);
 }
 
 int rl_exec_native(const char *path, char *const argv[], char *const envp[]) {

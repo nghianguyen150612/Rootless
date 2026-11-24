@@ -39,7 +39,7 @@ static int enter_user_namespace(const char **operation) {
     return rl_write_namespace_map("/proc/self/gid_map", mapping);
 }
 
-static int enter_root(int rootfd, const char **operation) {
+static int enter_root(const char **operation) {
     int error = enter_user_namespace(operation);
     if (error) return error;
 
@@ -48,8 +48,6 @@ static int enter_root(int rootfd, const char **operation) {
     *operation = "make mount propagation private";
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) return errno;
 
-    *operation = "fchdir(rootfs)";
-    if (fchdir(rootfd) != 0) return errno;
     *operation = "chroot";
     if (chroot(".") != 0) return errno;
     *operation = "chdir(/)";
@@ -64,8 +62,13 @@ int rl_exec_rootfs(const char *root, const char *path, char *const argv[],
     int rootfd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC);
     if (rootfd < 0) return errno;
 
-    int error = enter_root(rootfd, operation);
+    /* Set cwd before cloning mounts so the kernel remaps it into the new
+       mount namespace. An existing fd would still refer to the old mount. */
+    *operation = "fchdir(rootfs)";
+    int error = fchdir(rootfd) == 0 ? 0 : errno;
     close(rootfd);
+    if (error) return error;
+    error = enter_root(operation);
     if (error) return error;
 
     /* The kernel resolves the executable and its PT_INTERP against the new root. */

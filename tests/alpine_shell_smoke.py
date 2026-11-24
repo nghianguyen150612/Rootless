@@ -82,7 +82,7 @@ def main():
     (root / "etc/rl-p3-marker").write_text("alpine-rootfs\n")
     (root / "tmp/rl-absolute").symlink_to("/etc/rl-p3-marker")
     env = {**os.environ, "RL_P3_ENV": "preserved", "PS1": "rl-p3-shell> "}
-    command = [str(rl), "run", "-r", str(root), "--"]
+    command = [str(rl), "run", "-r", sys.argv[2], "--"]
     cwd = os.getcwd()
     script = r'''
 set -eu
@@ -129,6 +129,24 @@ exit 23
 
     run_pty([*command, "/bin/sh", "-i"], env)
     print("Alpine shell PTY, foreground child Ctrl-C, and exit=37: PASS", flush=True)
+
+    experiment = [str(rl), "dev-intercept", "--root", sys.argv[2],
+                  "--alpine-shell", "--", "/bin/sh"]
+    script = r'''
+set -eu
+[ "$0" = /bin/sh ] && [ "$1" = "two words" ] && [ "$2" = "" ]
+[ "$RL_P3_ENV" = preserved ]
+IFS= read -r linked_marker < /tmp/rl-absolute
+cd etc
+IFS= read -r local_marker < rl-p3-marker
+[ "$local_marker" = alpine-rootfs ] && [ "$linked_marker" = "$local_marker" ]
+printf 'musl direct invocation marker=%s\n' "$local_marker"
+exit 29
+'''
+    shell = subprocess.run([*experiment, "-c", script, "/bin/sh", "two words", ""],
+                           env=env, capture_output=True, text=True, timeout=15)
+    assert shell.returncode == 29 and shell.stdout == "musl direct invocation marker=alpine-rootfs\n", shell
+    print(shell.stdout.strip(), "exit=29", flush=True)
 
 
 if __name__ == "__main__":

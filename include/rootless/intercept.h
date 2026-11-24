@@ -17,4 +17,8 @@ int rl_experimental_intercept_run(const char *root_directory,
                                   char *const envp[],
                                   int *exit_status);
 
+/* P3 controlled AArch64 musl/Alpine /bin/sh experiment. No chroot semantics. */
+int rl_experimental_alpine_shell(const char *root_directory, char *const argv[],
+                                 char *const envp[], int *exit_status);
+
 #endif
