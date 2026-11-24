@@ -6,36 +6,31 @@ Rootless is an experimental, CLI-only, native-first Linux runtime project for
 **Android AArch64**, developed for Termux. The command is `rl`. Rootless does
 **not** require Magisk, `su`, a modified kernel, an unlocked bootloader or an APK.
 
-## Current status: P2 selective syscall prototype
+## P3 native Alpine shell
 
-`rl run -- ./static-program [ARG...]` replaces `rl` with a native static ELF
-using kernel exec semantics. **This is direct execution with no filesystem
-isolation**, using the caller's credentials, working directory, environment and
-inheritable descriptors. No PATH search is performed. Linux AArch64 is the
-target; x86_64 is supported for native CI validation. Android/Termux execution
-is **NOT_RUN** until tested on real hardware.
+```sh
+rl run -r ./alpine -- /bin/sh
+```
 
-Only little-endian ELF64 static ET_EXEC files matching the build architecture
-are accepted by `rl run`. Scripts, foreign architectures, dynamic executables
-and static PIE remain unsupported by that P1 backend. There is no custom ELF
-loader, CPU emulation, or fallback backend. The kernel enforces execution
-permissions, mount flags and LSM policy; errors include numeric errno values.
+This command launches a shell from an extracted Alpine rootfs when the host
+permits private mount namespaces and chroot. Native Linux ARM64 validation
+used Alpine 3.23.8 and demonstrated guest file reads, a BusyBox child command,
+and terminal interaction through a PTY. The kernel resolves the guest musl
+interpreter inside the rootfs. `rl native-probe` checks the prerequisites
+in a disposable child. Android/Termux execution remains **NOT_RUN**.
 
-`rl dev-intercept --root DIR -- FILE [ARG...]` is a development-only P2
-experiment. It redirects absolute `openat` calls using a seccomp user-notify
-supervisor; other syscalls remain native. It is not rootfs execution or
-filesystem isolation and is not part of ordinary `rl run`. See
-[P2 engine limits and evidence](docs/p2-fast-syscall-engine.md).
+`rl run -- ./static-program [ARG...]` remains the direct native ELF64 static
+ET_EXEC path, using the caller's credentials, working directory, environment
+and inheritable descriptors. Neither run mode searches PATH. Use trusted
+guest programs and rootfs trees.
 
-`rl native-probe` tests user namespaces, UID/GID mappings, mount namespace and
-private propagation, effective CAP_SYS_CHROOT, and real chroot in a disposable
-child. Each dependent step is skipped when a prerequisite fails. A successful
-probe does not enable a rootfs launcher. `rl run -r ...` returns 69 because no
-correct root-directory execution backend exists yet.
-
-See [P1 implementation and validation](docs/p1-native-execution.md) for direct
-execution and [P2 engine limits and evidence](docs/p2-fast-syscall-engine.md)
-for the isolated experiment.
+`rl dev-intercept --root DIR -- FILE [ARG...]` remains the development-only
+P2 absolute `openat` experiment. Its explicit `--alpine-shell -- /bin/sh`
+variant starts the Alpine AArch64 musl interpreter directly with selective
+path redirection. Relative paths and unhandled syscalls can reach the host.
+See [P3 implementation and validation](docs/p3-alpine-shell.md),
+[P1 direct execution](docs/p1-native-execution.md) and
+[P2 interception](docs/p2-fast-syscall-engine.md).
 
 ### Build / test on Linux
 
@@ -84,7 +79,8 @@ repository publishes it.
 | `rl run -- FILE [ARG...]` | Native direct static ELF execution |
 | `rl dev-intercept --root DIR -- FILE [ARG...]` | Experimental selected `openat` interception; not isolation |
 | `rl native-probe` | Isolated P1 namespace/mapping/chroot feasibility |
-| `rl run -r ROOTFS -- COMMAND` | Unsupported; exit 69 |
+| `rl run -r ROOTFS -- COMMAND` | Kernel chroot with a private mount namespace |
+| `rl dev-intercept --root DIR --alpine-shell -- /bin/sh [ARG...]` | AArch64 musl launch experiment with selected absolute `openat` redirection |
 | `rl doctor`, `rl info`, `rl benchmark` | Not implemented; exit 69 |
 | unknown argument / command | Usage failure; exit 64 |
 

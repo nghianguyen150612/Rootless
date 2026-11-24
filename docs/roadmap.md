@@ -12,8 +12,9 @@
   explicit limitations in `docs/p2-fast-syscall-engine.md`. Not a rootfs or
   filesystem isolation backend. Linux GCC/Clang and native ARM64 CI evidence
   requires successful workflow runs; Android/Termux: **NOT_RUN**.
-- **P3 — Pending**: Alpine ARM64 shell, ELF `PT_INTERP` and dynamic linker
-  lifecycle; do not add custom ELF loader without demonstrated need.
+- **P3 — Complete on native Linux ARM64**: Alpine musl shell through kernel
+  chroot, with a separate direct-musl interception experiment. See
+  [P3 validation](p3-alpine-shell.md). Android/Termux: **NOT_RUN**.
 - **P4 — Pending**: dirfds, CWD, symlinks, openat2, rename/link/unlink and
   fork/exec semantics, tested against real chroot.
 - **P5 — Pending**: progressive, evidenced compatibility (BusyBox, apk,
