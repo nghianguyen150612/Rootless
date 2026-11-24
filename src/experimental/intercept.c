@@ -11,8 +11,10 @@
 #include <linux/seccomp.h>
 #include <poll.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
@@ -33,6 +35,10 @@
 #endif
 #ifndef SECCOMP_USER_NOTIF_FLAG_CONTINUE
 #define SECCOMP_USER_NOTIF_FLAG_CONTINUE 1
+#endif
+
+#ifndef SECCOMP_ADDFD_FLAG_SEND
+#define SECCOMP_ADDFD_FLAG_SEND (1UL << 1)
 #endif
 
 struct result_message {
@@ -85,7 +91,7 @@ static int receive_listener(int sock) {
         .msg_controllen = sizeof(control.bytes)
     };
     ssize_t got;
-    do got = recvmsg(sock, &msg, 0); while (got < 0 && errno == EINTR);
+    do got = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC); while (got < 0 && errno == EINTR);
     if (got < 0) return -errno;
     if (msg.msg_flags & MSG_CTRUNC) return -EPROTO;
     if (got == sizeof(packet) && packet.marker == 'E' && packet.error > 0)
@@ -205,7 +211,7 @@ static int send_response(int listener, uint64_t id, int error, int value,
     return errno;
 }
 
-static int handle_notification(int listener, int rootfd) {
+static int handle_notification(int listener, int rootfd, bool alpine_shell) {
     struct seccomp_notif_sizes sizes;
     if (syscall(SYS_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &sizes) != 0)
         return errno;
@@ -231,28 +237,44 @@ static int handle_notification(int listener, int rootfd) {
                              SECCOMP_USER_NOTIF_FLAG_CONTINUE);
 
 #if !defined(SYS_openat2)
+    (void)alpine_shell;
     return send_response(listener, request.id, ENOTSUP, 0, 0);
 #else
+    /* The openat ABI takes int flags and ignores mode for ordinary opens.
+       openat2 validates both fields even when neither creates a file. */
+    uint64_t flags = (uint32_t)request.data.args[2];
+    if (flags & O_PATH) flags &= O_PATH | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW;
+    bool creates = (flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE;
     struct open_how how = {
-        .flags = request.data.args[2],
-        .mode = request.data.args[3],
+        .flags = flags,
+        .mode = creates ? request.data.args[3] & 07777 : 0,
         .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
     };
+    if (ioctl(listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &request.id) != 0)
+        return errno == ENOENT ? 0 : errno;
     int opened = (int)syscall(SYS_openat2, rootfd, path, &how, sizeof(how));
     if (opened < 0)
         return send_response(listener, request.id, errno, 0, 0);
     struct seccomp_notif_addfd addfd = {
         .id = request.id,
         .srcfd = (uint32_t)opened,
-        .newfd = 0,
-        .flags = 0,
-        .newfd_flags = 0
+        .flags = SECCOMP_ADDFD_FLAG_SEND,
+        .newfd_flags = flags & O_CLOEXEC
     };
     int targetfd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &addfd);
+    if (targetfd < 0 && errno == EINVAL && !alpine_shell) {
+        /* Keep the P2 fixture usable on kernels predating atomic add-and-reply. */
+        addfd.flags = 0;
+        targetfd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &addfd);
+        error = targetfd < 0 ? errno : 0;
+        close(opened);
+        return send_response(listener, request.id, error,
+                             error ? 0 : targetfd, 0);
+    }
     error = targetfd < 0 ? errno : 0;
     close(opened);
-    if (error) return send_response(listener, request.id, error, 0, 0);
-    return send_response(listener, request.id, 0, targetfd, 0);
+    if (!error || error == ENOENT) return 0;
+    return send_response(listener, request.id, error, 0, 0);
 #endif
 }
 
@@ -275,7 +297,7 @@ static int reap_available(pid_t primary, int *primary_status, int *primary_seen)
 }
 
 static int supervise_guest(int rootfd, int execfd, char *const argv[],
-                           char *const envp[], int *exit_status) {
+                           char *const envp[], bool alpine_shell, int *exit_status) {
     if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return errno;
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0)
@@ -313,7 +335,7 @@ static int supervise_guest(int rootfd, int execfd, char *const argv[],
         do ready = poll(&pfd, 1, 100); while (ready < 0 && errno == EINTR);
         if (ready < 0) { error = errno; break; }
         if (ready > 0 && (pfd.revents & POLLIN)) {
-            error = handle_notification(listener, rootfd);
+            error = handle_notification(listener, rootfd, alpine_shell);
             if (error) break;
         }
         if (ready > 0 && (pfd.revents & (POLLERR | POLLNVAL))) {
@@ -331,9 +353,9 @@ static int supervise_guest(int rootfd, int execfd, char *const argv[],
 }
 
 static void supervisor_process(int result_fd, int rootfd, int execfd,
-                               char *const argv[], char *const envp[]) {
+                               char *const argv[], char *const envp[], bool alpine_shell) {
     int status = 125;
-    int error = supervise_guest(rootfd, execfd, argv, envp, &status);
+    int error = supervise_guest(rootfd, execfd, argv, envp, alpine_shell, &status);
     struct result_message result = { .error = error, .exit_status = status };
     const char *p = (const char *)&result;
     size_t remaining = sizeof(result);
@@ -350,11 +372,9 @@ static void supervisor_process(int result_fd, int rootfd, int execfd,
     _exit(error ? 1 : 0);
 }
 
-int rl_experimental_intercept_run(const char *root_directory,
-                                  const char *executable,
-                                  char *const argv[],
-                                  char *const envp[],
-                                  int *exit_status) {
+static int run_intercepted(const char *root_directory, const char *executable,
+                           char *const argv[], char *const envp[],
+                           bool alpine_shell, int *exit_status) {
     if (!root_directory || !executable || !argv || !argv[0] || !envp ||
         !exit_status) return EINVAL;
     int error;
@@ -373,17 +393,27 @@ int rl_experimental_intercept_run(const char *root_directory,
         return error == ENOSYS ? ENOTSUP : error;
     }
     close(probe_fd);
+    int execfd;
+    if (alpine_shell) {
+        struct open_how how = {
+            .flags = O_RDONLY | O_CLOEXEC | O_NONBLOCK,
+            .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
+        };
+        execfd = (int)syscall(SYS_openat2, rootfd, executable, &how, sizeof(how));
+    } else {
+        execfd = open(executable, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    }
 #else
+    int execfd = -1;
     close(rootfd);
     return ENOTSUP;
 #endif
-    int execfd = open(executable, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (execfd < 0) {
         int error = errno;
         close(rootfd);
         return error;
     }
-    error = rl_check_native(execfd);
+    error = alpine_shell ? rl_check_native_linker(execfd) : rl_check_native(execfd);
     if (error) {
         close(execfd);
         close(rootfd);
@@ -407,7 +437,7 @@ int rl_experimental_intercept_run(const char *root_directory,
     }
     if (supervisor == 0) {
         close(result_pipe[0]);
-        supervisor_process(result_pipe[1], rootfd, execfd, argv, envp);
+        supervisor_process(result_pipe[1], rootfd, execfd, argv, envp, alpine_shell);
     }
     close(result_pipe[1]);
     close(execfd);
@@ -430,4 +460,37 @@ int rl_experimental_intercept_run(const char *root_directory,
         WEXITSTATUS(wait_status) != 0) return EIO;
     *exit_status = result.exit_status;
     return result.error;
+}
+
+int rl_experimental_intercept_run(const char *root_directory,
+                                  const char *executable, char *const argv[],
+                                  char *const envp[], int *exit_status) {
+    return run_intercepted(root_directory, executable, argv, envp, false, exit_status);
+}
+
+int rl_experimental_alpine_shell(const char *root_directory, char *const argv[],
+                                 char *const envp[], int *exit_status) {
+#if defined(__aarch64__)
+    if (!argv || !argv[0] || strcmp(argv[0], "/bin/sh")) return EINVAL;
+    char linker[] = "/lib/ld-musl-aarch64.so.1";
+    size_t argc = 0;
+    while (argv[argc]) ++argc;
+    char **linker_argv = calloc(argc + 5, sizeof(*linker_argv));
+    if (!linker_argv) return ENOMEM;
+    linker_argv[0] = linker;
+    linker_argv[1] = "--argv0";
+    linker_argv[2] = argv[0];
+    linker_argv[3] = "--";
+    memcpy(linker_argv + 4, argv, (argc + 1) * sizeof(*argv));
+    int error = run_intercepted(root_directory, linker, linker_argv, envp,
+                                true, exit_status);
+    free(linker_argv);
+    return error;
+#else
+    (void)root_directory;
+    (void)argv;
+    (void)envp;
+    (void)exit_status;
+    return ENOTSUP;
+#endif
 }

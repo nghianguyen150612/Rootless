@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #define _GNU_SOURCE
 #include "rootless/native.h"
+#include "namespace.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/capability.h>
@@ -9,29 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-static int map_file(const char *path, const char *value) {
-    int fd = open(path, O_WRONLY | O_CLOEXEC);
-    if (fd < 0) return errno;
-    size_t len = strlen(value);
-    ssize_t n = write(fd, value, len);
-    int error = n < 0 ? errno : (size_t)n == len ? 0 : EIO;
-    close(fd);
-    return error;
-}
-static int chroot_cap(void) {
-#ifdef SYS_capget
-    struct __user_cap_header_struct h = { .version = _LINUX_CAPABILITY_VERSION_3, .pid = 0 };
-    struct __user_cap_data_struct d[2] = {{0}};
-    if (syscall(SYS_capget, &h, d) != 0) return errno;
-    return (d[CAP_SYS_CHROOT / 32].effective & (1U << (CAP_SYS_CHROOT % 32))) ? 0 : EPERM;
-#else
-    return ENOSYS;
-#endif
-}
 static void result(rl_capability *p, int error) {
     p->error_number = error;
     p->status = rl_status_from_errno(error);
@@ -65,24 +46,24 @@ int rl_native_probes(rl_capability out[RL_NATIVE_PROBE_COUNT]) {
     pid_t pid = fork();
     if (pid == 0) {
         close(ends[0]);
-        result(&out[0], chroot_cap());
+        result(&out[0], rl_effective_capability(CAP_SYS_CHROOT));
         result(&out[1], unshare(CLONE_NEWUSER) == 0 ? 0 : errno);
         if (out[1].error_number) goto done;
-        result(&out[2], map_file("/proc/self/setgroups", "deny"));
+        result(&out[2], rl_write_namespace_map("/proc/self/setgroups", "deny"));
         /* Older kernels lack setgroups control; absence is recorded but mapping is valid. */
         if (out[2].error_number && out[2].error_number != ENOENT) goto done;
         char mapping[80];
         snprintf(mapping, sizeof(mapping), "0 %lu 1\n", (unsigned long)uid);
-        result(&out[3], map_file("/proc/self/uid_map", mapping));
+        result(&out[3], rl_write_namespace_map("/proc/self/uid_map", mapping));
         if (out[3].error_number) goto done;
         snprintf(mapping, sizeof(mapping), "0 %lu 1\n", (unsigned long)gid);
-        result(&out[4], map_file("/proc/self/gid_map", mapping));
+        result(&out[4], rl_write_namespace_map("/proc/self/gid_map", mapping));
         if (out[4].error_number) goto done;
         result(&out[5], unshare(CLONE_NEWNS) == 0 ? 0 : errno);
         if (out[5].error_number) goto done;
         result(&out[6], mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0 ? 0 : errno);
         if (out[6].error_number) goto done;
-        result(&out[7], chroot_cap());
+        result(&out[7], rl_effective_capability(CAP_SYS_CHROOT));
         if (out[7].error_number) goto done;
         result(&out[8], chroot(root) == 0 ? 0 : errno);
         if (!out[8].error_number && chdir("/") != 0) result(&out[8], errno);

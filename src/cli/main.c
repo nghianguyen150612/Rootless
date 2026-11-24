@@ -14,14 +14,16 @@
 #define RL_EX_UNAVAILABLE 69
 
 static void usage(FILE *file) {
-    fputs("Rootless — native-first Linux runtime for Android (P2 syscall prototype)\n"
+    fputs("Rootless — native-first Linux runtime for Android (P3 native rootfs)\n"
           "Usage: rl [--help | --version]\n"
           "       rl probe [--verbose]\n"
           "\n"
           "Commands:\n"
           "  probe       Inspect real host capabilities without modifying the caller\n"
           "  run -- FILE [ARG...]  Direct native static ELF; no filesystem isolation\n"
+          "  run -r DIR -- FILE [ARG...]  Kernel chroot backend when permitted\n"
           "  dev-intercept --root DIR -- FILE [ARG...]  Experimental P2 openat redirect\n"
+          "  dev-intercept --root DIR --alpine-shell -- /bin/sh [ARG...]  AArch64 musl experiment\n"
           "  native-probe         Test namespace/mapping/chroot feasibility in children\n"
           "  doctor      Not implemented\n"
           "  info        Not implemented\n"
@@ -82,13 +84,22 @@ int main(int argc, char **argv) {
             printf("%s %s errno=%d (%s): %s\n", caps[i].name,
                 rl_status_name(caps[i].status), caps[i].error_number,
                 strerror(caps[i].error_number), caps[i].detail);
-        puts("Direct execution provides no filesystem isolation. Rootfs engine: unsupported.");
+        puts("Direct execution provides no filesystem isolation. Rootfs engine requires a private mount namespace and chroot permission.");
         return 0;
     }
     if (argc >= 2 && !strcmp(argv[1], "run")) {
         if (argc >= 3 && !strcmp(argv[2], "-r")) {
-            fputs("rl: root-directory execution unsupported; no isolation backend\n", stderr);
-            return RL_EX_UNAVAILABLE;
+            if (argc < 6 || strcmp(argv[4], "--")) {
+                fputs("rl: usage: rl run -r DIR -- FILE [ARG...]\n", stderr);
+                return RL_EX_USAGE;
+            }
+            extern char **environ;
+            const char *operation;
+            int error = rl_exec_rootfs(argv[3], argv[5], &argv[5], environ,
+                                       &operation);
+            fprintf(stderr, "rl: rootfs execution failed at %s: errno=%d (%s)\n",
+                    operation, error, strerror(error));
+            return error == ENOENT ? 127 : 126;
         }
         if (argc < 4 || strcmp(argv[2], "--")) {
             fputs("rl: usage: rl run -- FILE [ARG...] (direct execution, no filesystem isolation)\n", stderr);
@@ -101,14 +112,22 @@ int main(int argc, char **argv) {
         return error == ENOENT ? 127 : 126;
     }
     if (argc >= 2 && !strcmp(argv[1], "dev-intercept")) {
-        if (argc < 6 || strcmp(argv[2], "--root") || strcmp(argv[4], "--")) {
-            fputs("rl: usage: rl dev-intercept --root DIR -- FILE [ARG...]\n", stderr);
+        bool alpine_shell = argc >= 5 && !strcmp(argv[4], "--alpine-shell");
+        int delimiter = alpine_shell ? 5 : 4;
+        if (argc <= delimiter + 1 || strcmp(argv[2], "--root") ||
+            strcmp(argv[delimiter], "--") ||
+            (alpine_shell && strcmp(argv[delimiter + 1], "/bin/sh"))) {
+            fputs("rl: usage: rl dev-intercept --root DIR -- FILE [ARG...]\n"
+                  "    or: rl dev-intercept --root DIR --alpine-shell -- /bin/sh [ARG...]\n",
+                  stderr);
             return RL_EX_USAGE;
         }
         extern char **environ;
+        char **guest = &argv[delimiter + 1];
         int status = 125;
-        int error = rl_experimental_intercept_run(argv[3], argv[5], &argv[5],
-                                                   environ, &status);
+        int error = alpine_shell
+            ? rl_experimental_alpine_shell(argv[3], guest, environ, &status)
+            : rl_experimental_intercept_run(argv[3], guest[0], guest, environ, &status);
         if (error) {
             fprintf(stderr, "rl: dev-intercept unavailable or failed: errno=%d: %s\n",
                     error, strerror(error));
