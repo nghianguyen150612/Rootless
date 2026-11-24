@@ -11,7 +11,9 @@ add_library(rootless_probe STATIC src/probe/probe.c)
 target_include_directories(rootless_probe PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
 
-add_library(rootless_native STATIC src/native/execute.c src/native/feasibility.c src/native/rootfs.c)
+add_library(rootless_native STATIC
+    src/native/execute.c src/native/feasibility.c src/native/namespace.c
+    src/native/rootfs.c)
 target_include_directories(rootless_native PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(rootless_native PUBLIC rootless_probe)
 

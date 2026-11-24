@@ -1,49 +1,75 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #define _GNU_SOURCE
 #include "rootless/native.h"
+#include "namespace.h"
+
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/capability.h>
 #include <sched.h>
 #include <stdio.h>
-#include <string.h>
 #include <sys/mount.h>
 #include <unistd.h>
 
-static int write_map(const char *path, const char *value) {
-    int fd = open(path, O_WRONLY | O_CLOEXEC);
-    if (fd < 0) return errno;
-    size_t len = strlen(value);
-    ssize_t n = write(fd, value, len);
-    int e = n < 0 ? errno : (size_t)n == len ? 0 : EIO;
-    close(fd);
-    return e;
+static int enter_user_namespace(const char **operation) {
+    uid_t uid = geteuid();
+    gid_t gid = getegid();
+    *operation = "unshare(CLONE_NEWUSER)";
+    if (unshare(CLONE_NEWUSER) != 0) {
+        int error = errno;
+        /* Existing capabilities can suffice on hosts that disable user namespaces. */
+        if (!rl_effective_capability(CAP_SYS_ADMIN) &&
+            !rl_effective_capability(CAP_SYS_CHROOT))
+            return 0;
+        return error;
+    }
+
+    *operation = "deny setgroups";
+    int error = rl_write_namespace_map("/proc/self/setgroups", "deny");
+    if (error && error != ENOENT) return error;
+
+    char mapping[80];
+    *operation = "write uid_map";
+    snprintf(mapping, sizeof(mapping), "0 %lu 1\n", (unsigned long)uid);
+    error = rl_write_namespace_map("/proc/self/uid_map", mapping);
+    if (error) return error;
+
+    *operation = "write gid_map";
+    snprintf(mapping, sizeof(mapping), "0 %lu 1\n", (unsigned long)gid);
+    return rl_write_namespace_map("/proc/self/gid_map", mapping);
 }
 
-/* Called only by the standalone launcher. Successful exec replaces it, retaining
-   the terminal, process group, PID and inherited descriptors. */
-int rl_exec_rootfs(const char *root, const char *path, char *const argv[], char *const envp[]) {
-    uid_t uid = getuid();
-    gid_t gid = getgid();
+static int enter_root(int rootfd, const char **operation) {
+    int error = enter_user_namespace(operation);
+    if (error) return error;
+
+    *operation = "unshare(CLONE_NEWNS)";
+    if (unshare(CLONE_NEWNS) != 0) return errno;
+    *operation = "make mount propagation private";
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) return errno;
+
+    *operation = "fchdir(rootfs)";
+    if (fchdir(rootfd) != 0) return errno;
+    *operation = "chroot";
+    if (chroot(".") != 0) return errno;
+    *operation = "chdir(/)";
+    if (chdir("/") != 0) return errno;
+
+    return 0;
+}
+
+int rl_exec_rootfs(const char *root, const char *path, char *const argv[],
+                   char *const envp[], const char **operation) {
+    *operation = "open rootfs";
     int rootfd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC);
     if (rootfd < 0) return errno;
-    if (unshare(CLONE_NEWUSER) == 0) {
-        char map[80];
-        int e = write_map("/proc/self/setgroups", "deny");
-        if (e && e != ENOENT) { close(rootfd); return e; }
-        snprintf(map, sizeof(map), "0 %lu 1\n", (unsigned long)uid);
-        e = write_map("/proc/self/uid_map", map);
-        if (e) { close(rootfd); return e; }
-        snprintf(map, sizeof(map), "0 %lu 1\n", (unsigned long)gid);
-        e = write_map("/proc/self/gid_map", map);
-        if (e) { close(rootfd); return e; }
-    }
-    /* A caller with existing capabilities may succeed even if user namespaces
-       are disabled. Mount namespace and private propagation are mandatory. */
-    if (unshare(CLONE_NEWNS) || mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) ||
-        fchdir(rootfd) || chroot(".") || chdir("/")) {
-        int e = errno; close(rootfd); return e;
-    }
+
+    int error = enter_root(rootfd, operation);
     close(rootfd);
+    if (error) return error;
+
+    /* The kernel resolves the executable and its PT_INTERP against the new root. */
+    *operation = "execve in rootfs";
     execve(path, argv, envp);
     return errno;
 }

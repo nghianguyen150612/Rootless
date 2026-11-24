@@ -1,4 +1,4 @@
-name: P2 native syscall prototype build and tests
+name: P3 native build and shell smoke
 on:
   push:
   pull_request:
@@ -33,3 +33,28 @@ jobs:
         run: echo 'Android/Termux NOT_RUN - real hardware required'
       - name: Validate Termux packaging script syntax
         run: sh -n packaging/termux/build-deb.sh
+
+  alpine-arm64:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 10
+    env:
+      CC: gcc
+      ALPINE_ARCHIVE: alpine-minirootfs-3.23.8-aarch64.tar.gz
+      ALPINE_SHA256: 3f1bd6811370264cc363bb991ff15ac67621b239ea6e25ff2eb22af3d0641473
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=OFF
+          cmake --build build --parallel 2
+      - name: Fetch Alpine AArch64 minirootfs
+        run: |
+          test "$(uname -m)" = aarch64
+          curl -fsSLO --retry 3 "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/$ALPINE_ARCHIVE"
+          printf '%s  %s\n' "$ALPINE_SHA256" "$ALPINE_ARCHIVE" | sha256sum -c -
+          mkdir alpine
+          tar -xzf "$ALPINE_ARCHIVE" -C alpine --no-same-owner
+      - name: Launch Alpine shell as unprivileged runner user
+        run: |
+          ./build/rl native-probe
+          python3 tests/alpine_shell_smoke.py ./build/rl ./alpine

@@ -93,8 +93,11 @@ int main(int argc, char **argv) {
                 return RL_EX_USAGE;
             }
             extern char **environ;
-            int error = rl_exec_rootfs(argv[3], argv[5], &argv[5], environ);
-            fprintf(stderr, "rl: rootfs execution failed: errno=%d: %s\n", error, strerror(error));
+            const char *operation;
+            int error = rl_exec_rootfs(argv[3], argv[5], &argv[5], environ,
+                                       &operation);
+            fprintf(stderr, "rl: rootfs execution failed at %s: errno=%d (%s)\n",
+                    operation, error, strerror(error));
             return error == ENOENT ? 127 : 126;
         }
         if (argc < 4 || strcmp(argv[2], "--")) {
