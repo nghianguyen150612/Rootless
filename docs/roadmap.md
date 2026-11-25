@@ -15,8 +15,11 @@
 - **P3 — Complete on native Linux ARM64**: Alpine musl shell through kernel
   chroot, with a separate direct-musl interception experiment. See
   [P3 validation](p3-alpine-shell.md). Android/Termux: **NOT_RUN**.
-- **P4 — Pending**: dirfds, CWD, symlinks, openat2, rename/link/unlink and
-  fork/exec semantics, tested against real chroot.
+- **P4 — Complete for the controlled native Linux acceptance**: optional
+  read-only VFS with CWD, dirfds, symlinks, openat2 and metadata, compared
+  against kernel chroot on ARM64. Userspace mutation and child exec remain
+  unsupported. See [P4 compatibility](p4-filesystem-process-compat.md).
+  Android/Termux: **NOT_RUN**.
 - **P5 — Pending**: progressive, evidenced compatibility (BusyBox, apk,
   Debian shell, Python, Git, OpenSSH, web server, database).
 - **P6 — Pending**: reproducible benchmark host/chroot/PRoot on same device,
