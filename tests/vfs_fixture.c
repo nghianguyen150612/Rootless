@@ -50,7 +50,7 @@ int main(int argc, char **argv, char **envp) {
     check_read(open("../../abs-link", O_RDONLY));
     FAILS(syscall(SYS_getcwd, argv, 1), ERANGE);
 
-    int dir = open("/a/b", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    int dir = open("/a/b", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     CHECK(dir >= 0 && fcntl(dir, F_GETFD) == FD_CLOEXEC);
     int duplicate = dup(dir);
     CHECK(duplicate >= 0 && fcntl(duplicate, F_GETFD) == 0);
@@ -86,6 +86,7 @@ int main(int argc, char **argv, char **envp) {
     char target[8] = {0};
     CHECK(readlinkat(duplicate, "jump", target, sizeof(target)) == 2 && !strcmp(target, "/a"));
     char truncated[2] = {0, 'x'};
+    FAILS(readlinkat(duplicate, "../marker", target, sizeof(target)), EINVAL);
     CHECK(readlinkat(duplicate, "jump", truncated, 1) == 1 &&
           truncated[0] == '/' && truncated[1] == 'x');
 
@@ -121,6 +122,7 @@ int main(int argc, char **argv, char **envp) {
         FAILS(mkdirat(AT_FDCWD, "should-not-exist", 0755), EROFS);
         FAILS(unlinkat(AT_FDCWD, "marker", 0), EROFS);
         FAILS(open("/regular-fifo", O_RDONLY), EOPNOTSUPP);
+        FAILS(open("/a", O_PATH | O_DIRECTORY), EOPNOTSUPP);
         const char *external_fd = getenv("RL_P4_EXTERNAL_FD");
         CHECK(external_fd);
         int external = atoi(external_fd);

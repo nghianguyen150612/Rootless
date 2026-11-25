@@ -158,9 +158,27 @@ int rl_vfs_probe(int rootfd) {
     return error;
 }
 
+/* Reopen a pinned inode without following a guest-selected pathname again. */
+static int reopen_regular_or_directory(int pinned, uint64_t flags, bool executable) {
+    struct stat st;
+    if (fstat(pinned, &st) < 0) return -errno;
+    if (S_ISLNK(st.st_mode)) return -ELOOP;
+    if (executable && !S_ISREG(st.st_mode)) return -EACCES;
+    if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) return -EOPNOTSUPP;
+
+    char proc[64];
+    proc_fd_name(pinned, proc);
+    int fd = open(proc, (int)(flags & ~O_NOFOLLOW) | O_CLOEXEC);
+    return fd < 0 ? -errno : fd;
+}
+
 int rl_vfs_open_executable(int rootfd, const char *path) {
     if (path[0] != '/') return -EINVAL;
-    return rooted_open(rootfd, path, O_RDONLY | O_NONBLOCK, 0);
+    int pinned = rooted_open(rootfd, path, O_PATH, 0);
+    if (pinned < 0) return pinned;
+    int fd = reopen_regular_or_directory(pinned, O_RDONLY | O_NONBLOCK, true);
+    close(pinned);
+    return fd;
 }
 
 int rl_vfs_start(struct rl_vfs *vfs, int rootfd, int execfd, pid_t guest) {
@@ -343,23 +361,15 @@ static int open_readonly(const struct rl_vfs *vfs, int dirfd, const char *path,
     uint64_t supported = RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS;
     uint64_t unsupported = RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_CACHED;
     if (how.resolve & ~(supported | unsupported)) return -EINVAL;
-    if (how.resolve & unsupported) return -EOPNOTSUPP;
+    if ((how.resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) ==
+        (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) return -EINVAL;
+    /* The notification injection API rejects O_PATH source descriptors. */
+    if ((how.resolve & unsupported) || (how.flags & O_PATH)) return -EOPNOTSUPP;
 
     int pinned = pin_path(vfs, dirfd, path, O_PATH | (how.flags & (O_DIRECTORY | O_NOFOLLOW)),
                           how.resolve);
-    if (pinned < 0 || (how.flags & O_PATH)) return pinned;
-
-    struct stat st;
-    int result;
-    if (fstat(pinned, &st) < 0) result = -errno;
-    else if (S_ISLNK(st.st_mode)) result = -ELOOP;
-    else if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) result = -EOPNOTSUPP;
-    else {
-        char proc[64];
-        proc_fd_name(pinned, proc);
-        int fd = open(proc, (int)(how.flags & ~O_NOFOLLOW) | O_CLOEXEC);
-        result = fd < 0 ? -errno : fd;
-    }
+    if (pinned < 0) return pinned;
+    int result = reopen_regular_or_directory(pinned, how.flags, false);
     close(pinned);
     return result;
 }
@@ -381,9 +391,13 @@ static int metadata(const struct rl_vfs *vfs, int listener,
                     int dirfd, const char *path, int flags, uint64_t argument, uint64_t output) {
     int supported_flags = AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH;
     if (op == STATX) supported_flags |= AT_STATX_SYNC_TYPE;
-    if (op == FACCESSAT2)
+    if (op == FACCESSAT2) {
         supported_flags = AT_SYMLINK_NOFOLLOW | AT_EACCESS | AT_EMPTY_PATH;
-    if (flags & ~supported_flags) return -EINVAL;
+        if (argument & ~(uint64_t)(R_OK | W_OK | X_OK)) return -EINVAL;
+    }
+    if ((flags & ~supported_flags) ||
+        (op == STATX && (flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE))
+        return -EINVAL;
     if (op == READLINKAT && (int)argument <= 0) return -EINVAL;
 
     bool empty = !*path && ((flags & AT_EMPTY_PATH) || op == READLINKAT);
@@ -404,7 +418,7 @@ static int metadata(const struct rl_vfs *vfs, int listener,
         size_t length = (unsigned int)argument;
         if (length > sizeof(target)) length = sizeof(target);
         ssize_t n = readlinkat(fd, "", target, length);
-        if (n < 0) result = -errno;
+        if (n < 0) result = -(errno == ENOENT && !empty ? EINVAL : errno);
         else {
             result = write_memory(listener, request, output, target, (size_t)n);
             if (!result) result = (int)n;
@@ -435,7 +449,8 @@ static int change_cwd(struct rl_vfs *vfs, int listener, const struct seccomp_not
 }
 
 int rl_vfs_dispatch(struct rl_vfs *vfs, int listener, const struct seccomp_notif *request) {
-    if ((pid_t)request->pid != vfs->guest) return send_result(listener, request->id, -EOPNOTSUPP, 0);
+    if ((pid_t)request->pid != vfs->guest)
+        return send_result(listener, request->id, -EOPNOTSUPP, 0);
     enum operation op = PROCESS_UNSUPPORTED;
     for (size_t i = 0; i < sizeof(intercepted) / sizeof(intercepted[0]); ++i) {
         if (intercepted[i].number == request->data.nr) {
@@ -462,6 +477,13 @@ int rl_vfs_dispatch(struct rl_vfs *vfs, int listener, const struct seccomp_notif
                    writable empty string before continuing the first exec. */
                 result = write_memory(listener, request, args[1], path, 1);
                 if (result) return -result;
+                /* Invalid source fd checks ioctl support without injecting a file. */
+                struct seccomp_notif_addfd probe = {
+                    .id = request->id, .flags = SECCOMP_ADDFD_FLAG_SEND,
+                    .srcfd = UINT32_MAX
+                };
+                if (ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &probe) >= 0) return EPROTO;
+                if (errno != EBADF) return errno == EINVAL ? EOPNOTSUPP : errno;
                 int sent = send_result(listener, request->id, 0, SECCOMP_USER_NOTIF_FLAG_CONTINUE);
                 if (!sent) vfs->launch_pending = false;
                 return sent;
@@ -541,9 +563,7 @@ int rl_vfs_dispatch(struct rl_vfs *vfs, int listener, const struct seccomp_notif
     }
 
     if (result || op == GETCWD) return send_result(listener, request->id, result, 0);
-    if (!pointer && (flags & AT_EMPTY_PATH) && (op == FSTATAT || op == STATX))
-        path[0] = '\0';
-    else result = read_path(vfs->guest, pointer, path);
+    result = read_path(vfs->guest, pointer, path);
     if (result) return send_result(listener, request->id, result, 0);
     result = validity(listener, request->id);
     if (result) return result;

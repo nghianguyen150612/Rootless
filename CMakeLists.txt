@@ -75,7 +75,7 @@ if(BUILD_TESTING)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_executable(vfs_fixture tests/vfs_fixture.c)
             target_compile_options(vfs_fixture PRIVATE -fno-pie -Wall -Wextra -Wpedantic)
-            target_link_options(vfs_fixture PRIVATE -static -no-pie)
+            target_link_options(vfs_fixture PRIVATE -static)
             add_test(NAME experimental_vfs COMMAND ${Python3_EXECUTABLE}
                 ${PROJECT_SOURCE_DIR}/tests/vfs_smoke.py $<TARGET_FILE:rl>
                 $<TARGET_FILE:vfs_fixture> --allow-unavailable)
