@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "rootless/intercept.h"
 #include "rootless/native.h"
+#include "vfs.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -12,6 +13,7 @@
 #include <poll.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +42,8 @@
 #ifndef SECCOMP_ADDFD_FLAG_SEND
 #define SECCOMP_ADDFD_FLAG_SEND (1UL << 1)
 #endif
+
+enum intercept_mode { P2_REDIRECT, P3_ALPINE, P4_VFS };
 
 struct result_message {
     int error;
@@ -106,7 +110,7 @@ static int receive_listener(int sock) {
     return fd;
 }
 
-static int install_openat_filter(void) {
+static int install_filter(enum intercept_mode mode) {
 #if !defined(SYS_seccomp) || !defined(SYS_openat)
     return -ENOTSUP;
 #elif defined(__aarch64__)
@@ -118,21 +122,32 @@ static int install_openat_filter(void) {
 #endif
 #if defined(SYS_seccomp) && defined(SYS_openat) && \
     (defined(__aarch64__) || defined(__x86_64__))
-    struct sock_filter code[] = {
+    struct sock_filter code[4 + 2 + RL_VFS_FILTER_CAPACITY + 1] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                  (uint32_t)offsetof(struct seccomp_data, arch)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, native_arch, 1, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
-                 (uint32_t)offsetof(struct seccomp_data, nr)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+                 (uint32_t)offsetof(struct seccomp_data, nr))
     };
-    struct sock_fprog program = {
-        .len = (unsigned short)(sizeof(code) / sizeof(code[0])),
-        .filter = code
-    };
+    size_t n = 4;
+    if (mode == P4_VFS) {
+        code[2].k = SECCOMP_RET_KILL_PROCESS;
+#if defined(__x86_64__)
+        /* x32 shares AUDIT_ARCH_X86_64 but uses a different syscall ABI. */
+        code[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K,
+                                                 0x40000000U, 0, 1);
+        code[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+#endif
+        size_t added = rl_vfs_filter(code + n);
+        if (!added) return -EOPNOTSUPP;
+        n += added;
+    } else {
+        code[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 1);
+        code[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF);
+    }
+    code[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    struct sock_fprog program = { .len = (unsigned short)n, .filter = code };
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return -errno;
     long fd = syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
                       SECCOMP_FILTER_FLAG_NEW_LISTENER, &program);
@@ -140,23 +155,35 @@ static int install_openat_filter(void) {
 #endif
 }
 
+static int bind_to_parent(pid_t parent) {
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0) return errno;
+    return getppid() == parent ? 0 : ESRCH;
+}
+
 static void guest_child(int sock, int rootfd, int execfd,
-                        char *const argv[], char *const envp[]) {
+                        char *const argv[], char *const envp[],
+                        enum intercept_mode mode, pid_t supervisor) {
+    int error = mode == P4_VFS ? bind_to_parent(supervisor) : 0;
+    if (error) {
+        send_setup_error(sock, error);
+        _exit(125);
+    }
     if (fchdir(rootfd) != 0) {
         send_setup_error(sock, errno);
         _exit(125);
     }
-    int listener = install_openat_filter();
+    int listener = install_filter(mode);
     if (listener < 0) {
         send_setup_error(sock, -listener);
         _exit(125);
     }
-    int error = send_listener(sock, listener);
+    error = send_listener(sock, listener);
     close(listener);
     close(sock);
     if (error) _exit(125);
 #ifdef SYS_execveat
-    syscall(SYS_execveat, execfd, "", argv, envp, AT_EMPTY_PATH);
+    char exec_path[] = "";
+    syscall(SYS_execveat, execfd, exec_path, argv, envp, AT_EMPTY_PATH);
     error = errno;
 #else
     error = ENOSYS;
@@ -211,7 +238,8 @@ static int send_response(int listener, uint64_t id, int error, int value,
     return errno;
 }
 
-static int handle_notification(int listener, int rootfd, bool alpine_shell) {
+static int handle_notification(int listener, int rootfd, enum intercept_mode mode,
+                               struct rl_vfs *vfs) {
     struct seccomp_notif_sizes sizes;
     if (syscall(SYS_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &sizes) != 0)
         return errno;
@@ -226,6 +254,11 @@ static int handle_notification(int listener, int rootfd, bool alpine_shell) {
     if (ioctl(listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &request.id) != 0)
         return errno == ENOENT ? 0 : errno;
 
+    if (mode == P4_VFS) {
+        int error = rl_vfs_dispatch(vfs, listener, &request);
+        return error == ENOENT ? 0 : error;
+    }
+
     /* Relative paths retain normal openat semantics. Only absolute paths are
        redirected; this interface does not claim to confine filesystem access. */
     char path[PATH_MAX];
@@ -237,7 +270,6 @@ static int handle_notification(int listener, int rootfd, bool alpine_shell) {
                              SECCOMP_USER_NOTIF_FLAG_CONTINUE);
 
 #if !defined(SYS_openat2)
-    (void)alpine_shell;
     return send_response(listener, request.id, ENOTSUP, 0, 0);
 #else
     /* The openat ABI takes int flags and ignores mode for ordinary opens.
@@ -262,7 +294,7 @@ static int handle_notification(int listener, int rootfd, bool alpine_shell) {
         .newfd_flags = flags & O_CLOEXEC
     };
     int targetfd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &addfd);
-    if (targetfd < 0 && errno == EINVAL && !alpine_shell) {
+    if (targetfd < 0 && errno == EINVAL && mode == P2_REDIRECT) {
         /* Keep the P2 fixture usable on kernels predating atomic add-and-reply. */
         addfd.flags = 0;
         targetfd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &addfd);
@@ -297,11 +329,17 @@ static int reap_available(pid_t primary, int *primary_status, int *primary_seen)
 }
 
 static int supervise_guest(int rootfd, int execfd, char *const argv[],
-                           char *const envp[], bool alpine_shell, int *exit_status) {
+                           char *const envp[], enum intercept_mode mode, int *exit_status) {
+    if (mode == P4_VFS) {
+        struct sigaction action = { .sa_handler = SIG_DFL };
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGCHLD, &action, NULL) != 0) return errno;
+    }
     if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return errno;
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0)
         return errno;
+    pid_t supervisor = getpid();
     pid_t guest = fork();
     if (guest < 0) {
         int error = errno;
@@ -311,13 +349,14 @@ static int supervise_guest(int rootfd, int execfd, char *const argv[],
     }
     if (guest == 0) {
         close(sockets[0]);
-        guest_child(sockets[1], rootfd, execfd, argv, envp);
+        guest_child(sockets[1], rootfd, execfd, argv, envp, mode, supervisor);
         _exit(125);
     }
     close(sockets[1]);
     int listener = receive_listener(sockets[0]);
     close(sockets[0]);
     if (listener < 0) {
+        if (mode == P4_VFS) (void)kill(guest, SIGKILL);
         int ignored;
         while (waitpid(guest, &ignored, 0) < 0 && errno == EINTR) {}
         return -listener;
@@ -325,8 +364,10 @@ static int supervise_guest(int rootfd, int execfd, char *const argv[],
 
     int primary_status = 0;
     int primary_seen = 0;
-    int error = 0;
-    for (;;) {
+    struct rl_vfs vfs;
+    int error = mode == P4_VFS ? rl_vfs_start(&vfs, rootfd, execfd, guest) : 0;
+    bool have_vfs = mode == P4_VFS && !error;
+    while (!error) {
         int reap_error = reap_available(guest, &primary_status, &primary_seen);
         if (reap_error == ECHILD) break;
         if (reap_error) { error = reap_error; break; }
@@ -335,7 +376,7 @@ static int supervise_guest(int rootfd, int execfd, char *const argv[],
         do ready = poll(&pfd, 1, 100); while (ready < 0 && errno == EINTR);
         if (ready < 0) { error = errno; break; }
         if (ready > 0 && (pfd.revents & POLLIN)) {
-            error = handle_notification(listener, rootfd, alpine_shell);
+            error = handle_notification(listener, rootfd, mode, &vfs);
             if (error) break;
         }
         if (ready > 0 && (pfd.revents & (POLLERR | POLLNVAL))) {
@@ -344,7 +385,14 @@ static int supervise_guest(int rootfd, int execfd, char *const argv[],
         }
     }
     close(listener);
-    if (error) return error;
+    if (have_vfs) rl_vfs_stop(&vfs);
+    if (error) {
+        if (mode == P4_VFS && !primary_seen) {
+            (void)kill(guest, SIGKILL);
+            while (waitpid(guest, NULL, 0) < 0 && errno == EINTR) {}
+        }
+        return error;
+    }
     if (!primary_seen) return ECHILD;
     if (WIFEXITED(primary_status)) *exit_status = WEXITSTATUS(primary_status);
     else if (WIFSIGNALED(primary_status)) *exit_status = 128 + WTERMSIG(primary_status);
@@ -353,9 +401,11 @@ static int supervise_guest(int rootfd, int execfd, char *const argv[],
 }
 
 static void supervisor_process(int result_fd, int rootfd, int execfd,
-                               char *const argv[], char *const envp[], bool alpine_shell) {
+                               char *const argv[], char *const envp[],
+                               enum intercept_mode mode, pid_t launcher) {
     int status = 125;
-    int error = supervise_guest(rootfd, execfd, argv, envp, alpine_shell, &status);
+    int error = mode == P4_VFS ? bind_to_parent(launcher) : 0;
+    if (!error) error = supervise_guest(rootfd, execfd, argv, envp, mode, &status);
     struct result_message result = { .error = error, .exit_status = status };
     const char *p = (const char *)&result;
     size_t remaining = sizeof(result);
@@ -369,12 +419,12 @@ static void supervisor_process(int result_fd, int rootfd, int execfd,
     close(result_fd);
     close(rootfd);
     close(execfd);
-    _exit(error ? 1 : 0);
+    _exit(remaining ? 1 : 0);
 }
 
 static int run_intercepted(const char *root_directory, const char *executable,
                            char *const argv[], char *const envp[],
-                           bool alpine_shell, int *exit_status) {
+                           enum intercept_mode mode, int *exit_status) {
     if (!root_directory || !executable || !argv || !argv[0] || !envp ||
         !exit_status) return EINVAL;
     int error;
@@ -394,7 +444,18 @@ static int run_intercepted(const char *root_directory, const char *executable,
     }
     close(probe_fd);
     int execfd;
-    if (alpine_shell) {
+    if (mode == P4_VFS) {
+        error = rl_vfs_probe(rootfd);
+        if (error) {
+            close(rootfd);
+            return error;
+        }
+        execfd = rl_vfs_open_executable(rootfd, executable);
+        if (execfd < 0) {
+            close(rootfd);
+            return -execfd;
+        }
+    } else if (mode == P3_ALPINE) {
         struct open_how how = {
             .flags = O_RDONLY | O_CLOEXEC | O_NONBLOCK,
             .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
@@ -413,7 +474,7 @@ static int run_intercepted(const char *root_directory, const char *executable,
         close(rootfd);
         return error;
     }
-    error = alpine_shell ? rl_check_native_linker(execfd) : rl_check_native(execfd);
+    error = mode == P3_ALPINE ? rl_check_native_linker(execfd) : rl_check_native(execfd);
     if (error) {
         close(execfd);
         close(rootfd);
@@ -426,6 +487,7 @@ static int run_intercepted(const char *root_directory, const char *executable,
         close(rootfd);
         return error;
     }
+    pid_t launcher = getpid();
     pid_t supervisor = fork();
     if (supervisor < 0) {
         error = errno;
@@ -437,7 +499,7 @@ static int run_intercepted(const char *root_directory, const char *executable,
     }
     if (supervisor == 0) {
         close(result_pipe[0]);
-        supervisor_process(result_pipe[1], rootfd, execfd, argv, envp, alpine_shell);
+        supervisor_process(result_pipe[1], rootfd, execfd, argv, envp, mode, launcher);
     }
     close(result_pipe[1]);
     close(execfd);
@@ -465,7 +527,7 @@ static int run_intercepted(const char *root_directory, const char *executable,
 int rl_experimental_intercept_run(const char *root_directory,
                                   const char *executable, char *const argv[],
                                   char *const envp[], int *exit_status) {
-    return run_intercepted(root_directory, executable, argv, envp, false, exit_status);
+    return run_intercepted(root_directory, executable, argv, envp, P2_REDIRECT, exit_status);
 }
 
 int rl_experimental_alpine_shell(const char *root_directory, char *const argv[],
@@ -483,7 +545,7 @@ int rl_experimental_alpine_shell(const char *root_directory, char *const argv[],
     linker_argv[3] = "--";
     memcpy(linker_argv + 4, argv, (argc + 1) * sizeof(*argv));
     int error = run_intercepted(root_directory, linker, linker_argv, envp,
-                                true, exit_status);
+                                P3_ALPINE, exit_status);
     free(linker_argv);
     return error;
 #else
@@ -493,4 +555,10 @@ int rl_experimental_alpine_shell(const char *root_directory, char *const argv[],
     (void)exit_status;
     return ENOTSUP;
 #endif
+}
+
+int rl_experimental_vfs_run(const char *root_directory, char *const argv[],
+                            char *const envp[], int *exit_status) {
+    if (!argv || !argv[0]) return EINVAL;
+    return run_intercepted(root_directory, argv[0], argv, envp, P4_VFS, exit_status);
 }

@@ -21,4 +21,8 @@ int rl_experimental_intercept_run(const char *root_directory,
 int rl_experimental_alpine_shell(const char *root_directory, char *const argv[],
                                  char *const envp[], int *exit_status);
 
+/* P4 read-only, single-process VFS experiment for a native static guest ELF. */
+int rl_experimental_vfs_run(const char *root_directory, char *const argv[],
+                            char *const envp[], int *exit_status);
+
 #endif

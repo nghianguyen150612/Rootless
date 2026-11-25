@@ -17,7 +17,8 @@ add_library(rootless_native STATIC
 target_include_directories(rootless_native PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(rootless_native PUBLIC rootless_probe)
 
-add_library(rootless_experimental STATIC src/experimental/intercept.c)
+add_library(rootless_experimental STATIC
+    src/experimental/intercept.c src/experimental/vfs.c)
 target_include_directories(rootless_experimental PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(rootless_experimental PUBLIC rootless_native)
 
@@ -71,6 +72,15 @@ if(BUILD_TESTING)
         add_test(NAME seccomp_user_notif_intercept COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/tests/intercept_test.py $<TARGET_FILE:rl>
             $<TARGET_FILE:intercept_fixture>)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_executable(vfs_fixture tests/vfs_fixture.c)
+            target_compile_options(vfs_fixture PRIVATE -fno-pie -Wall -Wextra -Wpedantic)
+            target_link_options(vfs_fixture PRIVATE -static)
+            add_test(NAME experimental_vfs COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/tests/vfs_smoke.py $<TARGET_FILE:rl>
+                $<TARGET_FILE:vfs_fixture> --allow-unavailable)
+            set_tests_properties(experimental_vfs PROPERTIES SKIP_RETURN_CODE 77)
+        endif()
     else()
         message(WARNING "Static native execution and interception tests NOT_RUN: static libc or Python3 unavailable")
     endif()

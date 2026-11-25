@@ -32,6 +32,15 @@ See [P3 implementation and validation](docs/p3-alpine-shell.md),
 [P1 direct execution](docs/p1-native-execution.md) and
 [P2 interception](docs/p2-fast-syscall-engine.md).
 
+## P4 experimental filesystem compatibility
+
+`rl dev-intercept --root DIR --vfs -- /FILE [ARG...]` adds virtual CWD,
+directory-relative lookup, and metadata for a trusted, single-process
+native static guest. It is read-only for translated operations and
+requires no user namespace. It provides no filesystem isolation.
+`rl run -r` continues to select kernel chroot. See the [syscall coverage
+matrix and backend limits](docs/p4-filesystem-process-compat.md).
+
 ### Build / test on Linux
 
 ```sh
@@ -78,6 +87,7 @@ repository publishes it.
 | `rl probe [--verbose]` | Executes isolated kernel feature probes |
 | `rl run -- FILE [ARG...]` | Native direct static ELF execution |
 | `rl dev-intercept --root DIR -- FILE [ARG...]` | Experimental selected `openat` interception; not isolation |
+| `rl dev-intercept --root DIR --vfs -- /FILE [ARG...]` | Experimental read-only VFS for a native static guest |
 | `rl native-probe` | Isolated P1 namespace/mapping/chroot feasibility |
 | `rl run -r ROOTFS -- COMMAND` | Kernel chroot with a private mount namespace |
 | `rl dev-intercept --root DIR --alpine-shell -- /bin/sh [ARG...]` | AArch64 musl launch experiment with selected absolute `openat` redirection |

@@ -14,7 +14,7 @@
 #define RL_EX_UNAVAILABLE 69
 
 static void usage(FILE *file) {
-    fputs("Rootless — native-first Linux runtime for Android (P3 native rootfs)\n"
+    fputs("Rootless — native-first Linux runtime for Android (P4 experimental VFS)\n"
           "Usage: rl [--help | --version]\n"
           "       rl probe [--verbose]\n"
           "\n"
@@ -24,6 +24,7 @@ static void usage(FILE *file) {
           "  run -r DIR -- FILE [ARG...]  Kernel chroot backend when permitted\n"
           "  dev-intercept --root DIR -- FILE [ARG...]  Experimental P2 openat redirect\n"
           "  dev-intercept --root DIR --alpine-shell -- /bin/sh [ARG...]  AArch64 musl experiment\n"
+          "  dev-intercept --root DIR --vfs -- /FILE [ARG...]  Experimental read-only VFS\n"
           "  native-probe         Test namespace/mapping/chroot feasibility in children\n"
           "  doctor      Not implemented\n"
           "  info        Not implemented\n"
@@ -113,21 +114,28 @@ int main(int argc, char **argv) {
     }
     if (argc >= 2 && !strcmp(argv[1], "dev-intercept")) {
         bool alpine_shell = argc >= 5 && !strcmp(argv[4], "--alpine-shell");
-        int delimiter = alpine_shell ? 5 : 4;
+        bool vfs = argc >= 5 && !strcmp(argv[4], "--vfs");
+        int delimiter = alpine_shell || vfs ? 5 : 4;
         if (argc <= delimiter + 1 || strcmp(argv[2], "--root") ||
             strcmp(argv[delimiter], "--") ||
-            (alpine_shell && strcmp(argv[delimiter + 1], "/bin/sh"))) {
+            (alpine_shell && strcmp(argv[delimiter + 1], "/bin/sh")) ||
+            (vfs && argv[delimiter + 1][0] != '/')) {
             fputs("rl: usage: rl dev-intercept --root DIR -- FILE [ARG...]\n"
-                  "    or: rl dev-intercept --root DIR --alpine-shell -- /bin/sh [ARG...]\n",
+                  "    or: rl dev-intercept --root DIR --alpine-shell -- /bin/sh [ARG...]\n"
+                  "    or: rl dev-intercept --root DIR --vfs -- /FILE [ARG...]\n",
                   stderr);
             return RL_EX_USAGE;
         }
         extern char **environ;
         char **guest = &argv[delimiter + 1];
         int status = 125;
-        int error = alpine_shell
-            ? rl_experimental_alpine_shell(argv[3], guest, environ, &status)
-            : rl_experimental_intercept_run(argv[3], guest[0], guest, environ, &status);
+        int error;
+        if (vfs)
+            error = rl_experimental_vfs_run(argv[3], guest, environ, &status);
+        else if (alpine_shell)
+            error = rl_experimental_alpine_shell(argv[3], guest, environ, &status);
+        else
+            error = rl_experimental_intercept_run(argv[3], guest[0], guest, environ, &status);
         if (error) {
             fprintf(stderr, "rl: dev-intercept unavailable or failed: errno=%d: %s\n",
                     error, strerror(error));
