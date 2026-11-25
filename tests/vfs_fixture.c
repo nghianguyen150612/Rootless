@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,10 @@ static void check_cwd(const char *expected) {
 
 int main(int argc, char **argv, char **envp) {
     CHECK(argc == 2);
+    if (!strcmp(argv[1], "signal")) {
+        raise(SIGTERM);
+        return 120;
+    }
     if (!strcmp(argv[1], "child")) {
         check_cwd("/a");
         check_read(open("marker", O_RDONLY));
@@ -124,7 +129,12 @@ int main(int argc, char **argv, char **envp) {
         FAILS(open("/regular-fifo", O_RDONLY), EOPNOTSUPP);
         FAILS(open("/a", O_PATH | O_DIRECTORY), EOPNOTSUPP);
         const char *external_fd = getenv("RL_P4_EXTERNAL_FD");
-        CHECK(external_fd);
+        const char *internal_fd = getenv("RL_P4_INTERNAL_FD");
+        CHECK(external_fd && internal_fd);
+        int internal = atoi(internal_fd);
+        check_read(openat(internal, "marker", O_RDONLY));
+        CHECK(fchdir(internal) == 0);
+        check_cwd("/a");
         int external = atoi(external_fd);
         FAILS(openat(external, "anything", O_RDONLY), EXDEV);
         FAILS(fchdir(external), EXDEV);
@@ -132,7 +142,7 @@ int main(int argc, char **argv, char **envp) {
         FAILS(execve("/fixture", child_argv, envp), EOPNOTSUPP);
         how.resolve = RESOLVE_BENEATH;
         FAILS(syscall(SYS_openat2, AT_FDCWD, "marker", &how, sizeof(how)), EOPNOTSUPP);
-        puts("readonly=ok external-dirfd=blocked fork/exec=unsupported");
+        puts("readonly=ok inherited-dirfd=ok external-dirfd=blocked fork/exec=unsupported");
     }
     return 23;
 }
