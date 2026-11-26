@@ -51,3 +51,15 @@ Do not infer these results from Linux CI or bypass device policy.
 Next checkpoint: obtain native ARM results, fix only demonstrated workload
 failures, then prototype and validate a lifecycle observation model before
 relaxing any process-creation restriction.
+
+## First native ARM CI result
+
+[Run 45782216292](https://github.com/nghianguyen150612/Rootless/actions/runs/45782216292)
+passed the GCC and Clang build/regression jobs on both x86_64 and native ARM64,
+and the P3 Alpine shell and P4 ARM differential steps. The new BusyBox step
+failed before guest execution: `pwd` returned 70, with ENOEXEC (8). The pinned
+Alpine binary is an AArch64 static PIE (ET_DYN); P4 validates VFS guests as
+static ET_EXEC. No BusyBox applet success is claimed. Supporting static PIE
+requires validating its loader and execution properties without weakening the
+existing executable checks, and remains future work. The overall CI run failed
+on this new workload gate.
