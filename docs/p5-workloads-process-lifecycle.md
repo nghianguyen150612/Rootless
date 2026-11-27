@@ -63,3 +63,26 @@ static ET_EXEC. No BusyBox applet success is claimed. Supporting static PIE
 requires validating its loader and execution properties without weakening the
 existing executable checks, and remains future work. The overall CI run failed
 on this new workload gate.
+
+
+## Static PIE recovery checkpoint
+
+The native validator admits ET_DYN executables only with an executable entry
+point, a mapped and terminated PT_DYNAMIC declaring DF_1_PIE, no PT_INTERP,
+and no DT_NEEDED. The kernel still loads the pinned descriptor. This is a
+conservative admission policy; it does not cover every static PIE. P5 remains
+PARTIAL until the mandatory ARM64 BusyBox CI workload passes. Full lifecycle
+support remains incomplete: fork, clone and later exec are rejected.
+
+USER_NOTIF does not report completed fork, exit or shared-state changes as an
+atomic lifecycle stream. A ptrace observer could provide fork/clone/exec/exit
+events, but ordering, thread identity, CLONE_FS/CLONE_FILES sharing, signal
+delivery and reaping must be prototyped together before permitting those calls.
+A cooperative runtime would need every guest to participate and cannot cover
+arbitrary BusyBox children. Neither approach has been demonstrated here; the
+next checkpoint is a restricted ptrace lifecycle prototype with explicit
+ordering and inherited CWD/FD tests, without enabling it by default.
+
+Local x86-64 GCC: static PIE direct execution passed; CTest nine passed, VFS
+skipped (bootstrap ENOSYS). ARM64 CI, BusyBox workloads, Clang and Android
+are pending at this checkpoint. USER_NOTIF is not a security sandbox.

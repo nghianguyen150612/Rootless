@@ -21,6 +21,10 @@ jobs:
         run: cmake --build build --parallel 2
       - name: CTest
         run: ctest --test-dir build --output-on-failure
+      - name: Static PIE execution
+        run: |
+          ${{ matrix.compiler }} -static-pie tests/native_fixture.c -o build/static-pie-fixture
+          ./build/rl run -- ./build/static-pie-fixture exit 42 || test "$?" = 42
       - name: Probe smoke test
         run: ./build/rl probe --verbose
       - name: Native feasibility (host-specific)
