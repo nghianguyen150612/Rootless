@@ -31,14 +31,7 @@ metadata are translated, and selected mutations return EROFS. Other unhandled
 syscalls and inherited descriptors may access the host. O_PATH injection is
 still unsupported. See P4 for precise operation and error details.
 
-The ARM CI job now obtains a checksum-pinned Alpine static BusyBox package and
-runs pwd, echo, cat, readlink, ls and a missing-file check against a disposable
-guest tree. The check is mandatory and does not substitute host commands. Its
-result is evidence only after the job runs; the shell, apk and other workload
-stages are not claimed. On the local x86_64 environment GCC built successfully;
-nine CTest cases passed and the VFS case was skipped because bootstrap returned
-ENOSYS. Static BusyBox locally hit the same blocker. Clang and P5 ARM CI results
-must be recorded separately. P3 ARM Alpine coverage remains in CI.
+[Native ARM64 CI run 45960852170](https://github.com/nghianguyen150612/Rootless/actions/runs/45960852170) passed the checksum-pinned Alpine static BusyBox `pwd`, `echo`, `cat`, `readlink`, `ls`, and missing-file workloads against a disposable guest tree. The same run passed P3 Alpine kernel chroot, P4 VFS checks, and GCC and Clang regressions on ARM64 and x86-64. No new syscall blocker appeared in these workloads. Broader shell and package workloads remain outside this result.
 
 Android/Termux: **NOT_RUN**. On a real AArch64 device build with Termux clang
 and CMake in an executable app-permitted location, run `rl native-probe`, the
@@ -48,8 +41,7 @@ atomic ADDFD, openat2, process_vm read/write, procfs visibility, executable
 policy and SELinux behavior; ptrace requires separate authorization evaluation.
 Do not infer these results from Linux CI or bypass device policy.
 
-Next checkpoint: obtain native ARM results, fix only demonstrated workload
-failures, then prototype and validate a lifecycle observation model before
+Next checkpoint: prototype and validate a lifecycle observation model before
 relaxing any process-creation restriction.
 
 ## First native ARM CI result
@@ -59,9 +51,7 @@ passed the GCC and Clang build/regression jobs on both x86_64 and native ARM64,
 and the P3 Alpine shell and P4 ARM differential steps. The new BusyBox step
 failed before guest execution: `pwd` returned 70, with ENOEXEC (8). The pinned
 Alpine binary is an AArch64 static PIE (ET_DYN); P4 validates VFS guests as
-static ET_EXEC. No BusyBox applet success is claimed. Supporting static PIE
-requires validating its loader and execution properties without weakening the
-existing executable checks, and remains future work. The overall CI run failed
+static ET_EXEC. That historical run did not execute any BusyBox applet. The overall CI run failed
 on this new workload gate.
 
 
@@ -71,7 +61,7 @@ The native validator admits ET_DYN executables only with an executable entry
 point, a mapped and terminated PT_DYNAMIC declaring DF_1_PIE, no PT_INTERP,
 and no DT_NEEDED. The kernel still loads the pinned descriptor. This is a
 conservative admission policy; it does not cover every static PIE. P5 remains
-PARTIAL until the mandatory ARM64 BusyBox CI workload passes. Full lifecycle
+PARTIAL for the full lifecycle objective; the restricted BusyBox workload milestone passed. Full lifecycle
 support remains incomplete: fork, clone and later exec are rejected.
 
 USER_NOTIF does not report completed fork, exit or shared-state changes as an
@@ -84,5 +74,4 @@ next checkpoint is a restricted ptrace lifecycle prototype with explicit
 ordering and inherited CWD/FD tests, without enabling it by default.
 
 Local x86-64 GCC: static PIE direct execution passed; CTest nine passed, VFS
-skipped (bootstrap ENOSYS). ARM64 CI, BusyBox workloads, Clang and Android
-are pending at this checkpoint. USER_NOTIF is not a security sandbox.
+skipped (bootstrap ENOSYS). Native ARM64 and Clang CI passed as noted above; Android remains NOT_RUN. USER_NOTIF is not a security sandbox.

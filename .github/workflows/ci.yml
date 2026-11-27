@@ -25,6 +25,7 @@ jobs:
         run: |
           ${{ matrix.compiler }} -static-pie tests/native_fixture.c -o build/static-pie-fixture
           ./build/rl run -- ./build/static-pie-fixture exit 42 || test "$?" = 42
+          python3 tests/static_pie_admission.py ./build/rl ./build/static-pie-fixture
       - name: Probe smoke test
         run: ./build/rl probe --verbose
       - name: Native feasibility (host-specific)
