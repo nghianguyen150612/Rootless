@@ -33,7 +33,7 @@ p = run(fixture, 'fd', str(w), pass_fds=(w,))
 os.close(w)
 assert p.returncode == 0 and os.read(r, 100) == b'inherited'
 os.close(r)
-failure(dynamic, errno.ENOEXEC if struct.unpack_from('<H', Path(dynamic).read_bytes(), 16)[0] != 2 else errno.ENOTSUP)
+failure(dynamic, errno.ENOTSUP)
 with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     failure(root / 'missing', errno.ENOENT, 127)
@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory() as temp:
         altered[offset:offset+len(value)] = value
         f.write_bytes(altered)
         failure(f, errno.ENOEXEC)
-    # Header permits static ET_EXEC only; reject truncated program tables.
+    # Reject truncated program tables.
     altered = data.copy()
     struct.pack_into('<Q', altered, 32, len(data))
     f.write_bytes(altered)

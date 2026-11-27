@@ -21,6 +21,11 @@ jobs:
         run: cmake --build build --parallel 2
       - name: CTest
         run: ctest --test-dir build --output-on-failure
+      - name: Static PIE execution
+        run: |
+          ${{ matrix.compiler }} -static-pie tests/native_fixture.c -o build/static-pie-fixture
+          ./build/rl run -- ./build/static-pie-fixture exit 42 || test "$?" = 42
+          python3 tests/static_pie_admission.py ./build/rl ./build/static-pie-fixture
       - name: Probe smoke test
         run: ./build/rl probe --verbose
       - name: Native feasibility (host-specific)
@@ -62,3 +67,12 @@ jobs:
           python3 tests/alpine_shell_smoke.py ./build/rl ./alpine
       - name: Compare userspace VFS with kernel chroot on native ARM64
         run: python3 tests/vfs_smoke.py ./build/rl ./build/vfs_fixture --arm64-reference
+
+      - name: Fetch pinned Alpine static BusyBox
+        run: |
+          curl -fsSLo busybox-static.apk --retry 3 https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/busybox-static-1.37.0-r30.apk
+          printf '%s  %s\n' 44c9abdfb970f398fa72c8382fe2d8808eea16beaf82daf6ac708b92f1b8659e busybox-static.apk | sha256sum -c -
+          mkdir busybox-root
+          tar -xzf busybox-static.apk -C busybox-root --no-same-owner bin/busybox.static
+      - name: Run real static BusyBox under experimental VFS
+        run: python3 tests/busybox_smoke.py ./build/rl ./busybox-root/bin/busybox.static

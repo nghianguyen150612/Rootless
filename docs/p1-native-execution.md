@@ -7,9 +7,10 @@ tests are unchanged. P0 architecture/compatibility documents remain historical.
 ## Execution semantics
 
 `rl run -- FILE [ARG...]` opens FILE read-only with CLOEXEC and validates a
-bounded ELF64 header/program-header table. It accepts static ET_EXEC for the
-compiler target (AArch64 or x86_64), with at least one PT_LOAD and no PT_INTERP
-or PT_DYNAMIC. The kernel remains the ELF loader and final format validator.
+bounded ELF64 header/program-header table. It accepts static ET_EXEC and conservatively identified static PIE ET_DYN for the
+compiler target (AArch64 or x86_64), with at least one PT_LOAD and no PT_INTERP.
+ET_EXEC rejects PT_DYNAMIC; static PIE requires a mapped PT_DYNAMIC with
+DF_1_PIE and no DT_NEEDED. The kernel remains the ELF loader and final format validator.
 The launcher uses `execveat(fd, "", argv, envp, AT_EMPTY_PATH)`, the kernel
 descriptor form of execve, to pin the checked
 inode instead of reopening a replaceable pathname. It adds no supervisor:
@@ -31,7 +32,7 @@ there is no /proc fallback or alternate runtime backend.
 On launch failure the CLI returns 127 for ENOENT and 126 otherwise, with exact
 numeric errno and strerror. Usage errors return 64. Root-directory execution
 returns 69. A guest may itself return any of these values; a launch diagnostic
-distinguishes an error. Dynamic ELF, static PIE, ELF32, scripts, big-endian ELF
+distinguishes an error. Dynamic ELF, unsupported PIE forms, ELF32, scripts, big-endian ELF
 and foreign machines are deliberately rejected. Android's Bionic launcher
 cannot establish glibc compatibility; static native execution still depends on
 kernel ABI and app/SELinux/seccomp execution policy.
